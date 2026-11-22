@@ -18,16 +18,20 @@ int main(int argc,char**argv){
     // collide with mock bootstrap listeners in rapid/repeated CTest runs.
     // A PID-derived prefix also isolates concurrent test processes.
     const uint16_t base=uint16_t(12000+(getpid()%100)*200);
-    auto* region=new VerbsReleaseServer(release_opts("mock0",4096+2*locks+32));
+    // The mock test's operation budget must never be its performance limiter.
+    // Fast CI hosts can execute >2,900 simulated operations in 170 ms.
+    constexpr uint64_t kTestSlots=131072, kTestMaxOps=90000;
+    if(setenv("MUCQL_PAXOS_SLOTS", "131072", 1)!=0)fail("setenv mock slots");
+    auto* region=new VerbsReleaseServer(release_opts("mock0",kTestSlots+2*locks+32));
     std::thread([region,base]{try{region->listen_forever(uint16_t(base+20));}
       catch(const std::exception& e){std::cerr<<"mock data server: "<<e.what()<<std::endl;std::_Exit(24);}}).detach();
-    for(int r=0;r<3;r++)std::thread([r,base]{try{RdmaPaxosOptions o;o.device="mock0";o.slots=4096;
+    for(int r=0;r<3;r++)std::thread([r,base]{try{RdmaPaxosOptions o;o.device="mock0";o.slots=kTestSlots;
       serve_rdma_paxos(uint16_t(base+21+r),o);
     }catch(const std::exception& e){std::cerr<<"mock ordering server: "<<e.what()<<std::endl;std::_Exit(24);}}).detach();
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     std::exception_ptr coord_error;
     std::thread coordinator_thread([&]{try{
-      std::vector<std::string> a={"mucql_lock_live","coordinator",std::to_string(base+10),"90001","2900",std::to_string(workers),
+      std::vector<std::string> a={"mucql_lock_live","coordinator",std::to_string(base+10),"90001",std::to_string(kTestMaxOps),std::to_string(workers),
        "127.0.0.1:"+std::to_string(base+20),"127.0.0.1:"+std::to_string(base+21),
        "127.0.0.1:"+std::to_string(base+22),"127.0.0.1:"+std::to_string(base+23),
        "mock0",std::to_string(join),std::to_string(phase),std::to_string(prep),std::to_string(ahead),

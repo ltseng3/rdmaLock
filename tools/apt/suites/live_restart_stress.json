@@ -29,8 +29,8 @@
       ],
       "warmup_ms": 100,
       "measure_ms": 250,
-      "paxos_slots": 16384,
-      "max_ops": 6500,
+      "paxos_slots": 131072,
+      "max_ops": 90000,
       "repetitions": 12
     }
   ]

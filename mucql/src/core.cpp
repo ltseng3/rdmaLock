@@ -151,6 +151,12 @@ bool Client::activate(const Ticket& t,const Clock& clock) {
      known.deadline!=t.deadline || known.client!=id_)return false;
   auto b=clock.now();
   if(b.lower>b.upper || b.upper>=t.deadline)return false;
+  // Even if malformed notifications arrive, a client never acquires two
+  // positions of the same lock concurrently.
+  for(const auto& kv:grants_){
+    if(kv.first!=t.grant_id && kv.second.ticket.lock==t.lock &&
+       kv.second.status==Status::Holding)return false;
+  }
   it->second.status=Status::Holding;return true;
 }
 bool Client::activate_handoff(const Handoff& h,const Clock& clock) {
@@ -171,14 +177,18 @@ Client::Release Client::retire(const Ticket& current,
   auto it=grants_.find(current.grant_id);
   if(it==grants_.end() || it->second.status!=Status::Holding ||
      it->second.ticket.lock!=current.lock ||
-     it->second.ticket.position!=current.position)
+     it->second.ticket.position!=current.position ||
+     it->second.ticket.client!=current.client ||
+     it->second.ticket.request!=current.request ||
+     it->second.ticket.deadline!=current.deadline ||
+     it->second.ticket.predecessor_id!=current.predecessor_id)
     throw std::logic_error("release without ownership");
   // Crucial ordering: all protected effects must have completed BEFORE this.
   it->second.status=Status::Retired;
   Release result{ReleaseMark{current.lock,current.position,current.grant_id},
                  std::nullopt};
   if(next && next->lock==current.lock && next->position==current.position+1
-     && next->deadline!=0)
+     && next->deadline!=0 && next->predecessor_id==current.grant_id)
     result.handoff=Handoff{*next,current.grant_id,current.position};
   return result;
 }

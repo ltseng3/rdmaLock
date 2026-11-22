@@ -26,7 +26,7 @@ struct ibv_qp_attr {ibv_qp_state qp_state;int pkey_index;int port_num;int qp_acc
    ibv_ah_attr ah_attr;uint32_t timeout,retry_cnt,rnr_retry,sq_psn,max_rd_atomic;};
 struct ibv_qp {uint32_t qp_num; ibv_cq* cq;uint32_t remote_qpn;ibv_qp_state state;};
 struct ibv_sge {uint64_t addr;uint32_t length,lkey;};
-enum ibv_wr_opcode {IBV_WR_RDMA_WRITE=0,IBV_WR_ATOMIC_CMP_AND_SWP=1};
+enum ibv_wr_opcode {IBV_WR_RDMA_WRITE=0,IBV_WR_ATOMIC_CMP_AND_SWP=1,IBV_WR_RDMA_READ=2};
 struct ibv_send_wr {uint64_t wr_id; ibv_send_wr* next;ibv_sge* sg_list;int num_sge;ibv_wr_opcode opcode;unsigned send_flags;
   union { struct {uint64_t remote_addr;uint32_t rkey;} rdma;
           struct {uint64_t remote_addr;uint64_t compare_add,swap;uint32_t rkey;} atomic;} wr;

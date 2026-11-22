@@ -38,17 +38,27 @@ int ibv_post_send(ibv_qp* q,ibv_send_wr*wr,ibv_send_wr**bad){
   auto peer=qps.find(q->remote_qpn);
   if(q->state!=IBV_QPS_RTS||peer==qps.end()||peer->second->state!=IBV_QPS_RTS)return -1;
   for(auto* w=wr;w;w=w->next){
-    uint64_t addr= w->opcode==IBV_WR_RDMA_WRITE ? w->wr.rdma.remote_addr : w->wr.atomic.remote_addr;
-    uint32_t rkey= w->opcode==IBV_WR_RDMA_WRITE ? w->wr.rdma.rkey : w->wr.atomic.rkey;
+    uint64_t addr= w->opcode!=IBV_WR_ATOMIC_CMP_AND_SWP ? w->wr.rdma.remote_addr : w->wr.atomic.remote_addr;
+    uint32_t rkey= w->opcode!=IBV_WR_ATOMIC_CMP_AND_SWP ? w->wr.rdma.rkey : w->wr.atomic.rkey;
     auto it=regions.find(rkey);if(it==regions.end())return -1;
     auto* mr=it->second;auto low=reinterpret_cast<uintptr_t>(mr->addr);
     if(addr<low || addr+w->sg_list->length>low+mr->length)return -1;
     auto* target=reinterpret_cast<uint64_t*>(addr);
-    if(w->opcode==IBV_WR_RDMA_WRITE)std::memcpy(target,reinterpret_cast<const void*>(w->sg_list->addr),w->sg_list->length);
+    if(w->opcode==IBV_WR_RDMA_WRITE){
+      if(w->sg_list->length==8){uint64_t v;
+        std::memcpy(&v,reinterpret_cast<const void*>(w->sg_list->addr),8);
+        __atomic_store_n(target,v,__ATOMIC_RELEASE);
+      }else std::memcpy(target,reinterpret_cast<const void*>(w->sg_list->addr),w->sg_list->length);
+    }
+    else if(w->opcode==IBV_WR_RDMA_READ){
+      if(w->sg_list->length==8){auto v=__atomic_load_n(target,__ATOMIC_ACQUIRE);
+        std::memcpy(reinterpret_cast<void*>(w->sg_list->addr),&v,8);
+      }else std::memcpy(reinterpret_cast<void*>(w->sg_list->addr),target,w->sg_list->length);
+    }
     else{
-      auto old=*target;
+      auto old=__atomic_load_n(target,__ATOMIC_ACQUIRE);
       std::memcpy(reinterpret_cast<void*>(w->sg_list->addr),&old,8);
-      if(old==w->wr.atomic.compare_add)*target=w->wr.atomic.swap;
+      if(old==w->wr.atomic.compare_add)__atomic_store_n(target,w->wr.atomic.swap,__ATOMIC_RELEASE);
     }
     if(w->send_flags&IBV_SEND_SIGNALED)q->cq->completions++;
   }

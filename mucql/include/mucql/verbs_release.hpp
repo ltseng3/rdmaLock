@@ -41,6 +41,11 @@ class VerbsReleaseClient {
   // For WriteHint this confirms NIC completion ONLY, not proof of atomicity.
   bool complete();
   uint32_t slots() const;
+  // Synchronous RC operations. CAS returns the old value, so callers must
+  // verify ownership immediately (never spin to conceal a double grant).
+  uint64_t compare_exchange(size_t slot, uint64_t expected, uint64_t desired);
+  uint64_t read_slot(size_t slot);
+  void write_slot(size_t slot, uint64_t value);
  private:
   struct Impl; std::unique_ptr<Impl> impl_;
 };

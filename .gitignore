@@ -26,3 +26,5 @@ id_rsa
 .env.*
 !.env.example
 .DS_Store
+
+*.pid

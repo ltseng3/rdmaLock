@@ -2,6 +2,18 @@
 
 C++17 utilities for ordered queue entries, one-sided RDMA transport, and repeatable throughput smoke tests.
 
+## End-to-end exclusive locking
+
+The `mucql_lock_e2e` binary exercises a precommitted FIFO of exclusive lock
+positions on CloudLab Apt using three RDMA ordering acceptors, peer-to-peer
+one-sided handoff CAS, one-sided release markers, and an RDMA WRITE to shared
+protected data under the lock. An optional owner-CAS probe detects overlapping
+critical sections. The test is fail-closed and does not enable clock-based
+lease recovery.
+
+**Dashboard instructions:** [End-to-end locking on Apt](tools/apt/E2E.md).
+This is a fixed-batch lock test, not a dynamic DecLock benchmark replacement.
+
 ## Automated checks
 
 GitHub Actions runs the C++ unit tests, mock-verbs tests, a TCP quorum smoke test, and a native `libibverbs` compilation check on every push. The hosted runner has no RDMA device, so hardware tests run separately.

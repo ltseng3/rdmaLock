@@ -142,7 +142,8 @@ struct VerbsReleaseServer::Impl {
     if(posix_memalign(&slots_mem,4096,static_cast<size_t>(slots)*8))fail("allocation");
     std::memset(slots_mem,0,static_cast<size_t>(slots)*8);
     mr=ibv_reg_mr(dev.pd,slots_mem,static_cast<size_t>(slots)*8,
-                IBV_ACCESS_LOCAL_WRITE|IBV_ACCESS_REMOTE_WRITE|IBV_ACCESS_REMOTE_ATOMIC);
+                IBV_ACCESS_LOCAL_WRITE|IBV_ACCESS_REMOTE_WRITE|
+                IBV_ACCESS_REMOTE_ATOMIC|IBV_ACCESS_REMOTE_READ);
     if(!mr)fail("ibv_reg_mr remote atomic/write");
   }
   ~Impl(){if(mr)ibv_dereg_mr(mr);std::free(slots_mem);}
@@ -216,5 +217,51 @@ bool VerbsReleaseClient::complete(){
   if(!impl_->pending)throw std::logic_error("no RDMA WR pending");
   impl_->qp.poll_one();impl_->pending=false;
   return impl_->mode==ReleaseMode::WriteHint || impl_->local_buf==0 || impl_->local_buf==impl_->desired;
+}
+} // namespace mucql
+
+namespace mucql {
+uint64_t VerbsReleaseClient::compare_exchange(size_t slot,uint64_t expected,uint64_t desired){
+  if(impl_->pending)throw std::logic_error("pending WR: drain before CAS");
+  if(slot>=impl_->remote.slots)throw std::out_of_range("CAS slot");
+  impl_->local_buf=0;
+  ibv_sge sg{};sg.addr=reinterpret_cast<uintptr_t>(&impl_->local_buf);
+  sg.length=8;sg.lkey=impl_->mr->lkey;
+  ibv_send_wr wr{};wr.wr_id=slot;wr.sg_list=&sg;wr.num_sge=1;
+  wr.send_flags=IBV_SEND_SIGNALED;wr.opcode=IBV_WR_ATOMIC_CMP_AND_SWP;
+  wr.wr.atomic.remote_addr=impl_->remote.region_addr+slot*8;
+  wr.wr.atomic.rkey=impl_->remote.rkey;
+  wr.wr.atomic.compare_add=expected;wr.wr.atomic.swap=desired;
+  ibv_send_wr* bad=nullptr;
+  if(ibv_post_send(impl_->qp.qp,&wr,&bad))fail("CAS post");
+  impl_->qp.poll_one();return impl_->local_buf;
+}
+uint64_t VerbsReleaseClient::read_slot(size_t slot){
+  if(impl_->pending)throw std::logic_error("pending WR: drain before READ");
+  if(slot>=impl_->remote.slots)throw std::out_of_range("READ slot");
+  impl_->local_buf=0;
+  ibv_sge sg{};sg.addr=reinterpret_cast<uintptr_t>(&impl_->local_buf);
+  sg.length=8;sg.lkey=impl_->mr->lkey;
+  ibv_send_wr wr{};wr.wr_id=slot;wr.sg_list=&sg;wr.num_sge=1;
+  wr.send_flags=IBV_SEND_SIGNALED;wr.opcode=IBV_WR_RDMA_READ;
+  wr.wr.rdma.remote_addr=impl_->remote.region_addr+slot*8;
+  wr.wr.rdma.rkey=impl_->remote.rkey;
+  ibv_send_wr* bad=nullptr;
+  if(ibv_post_send(impl_->qp.qp,&wr,&bad))fail("READ post");
+  impl_->qp.poll_one();return impl_->local_buf;
+}
+void VerbsReleaseClient::write_slot(size_t slot,uint64_t value){
+  if(impl_->pending)throw std::logic_error("pending WR: drain before WRITE");
+  if(slot>=impl_->remote.slots)throw std::out_of_range("WRITE slot");
+  impl_->local_buf=value;
+  ibv_sge sg{};sg.addr=reinterpret_cast<uintptr_t>(&impl_->local_buf);
+  sg.length=8;sg.lkey=impl_->mr->lkey;
+  ibv_send_wr wr{};wr.wr_id=slot;wr.sg_list=&sg;wr.num_sge=1;
+  wr.send_flags=IBV_SEND_SIGNALED;wr.opcode=IBV_WR_RDMA_WRITE;
+  wr.wr.rdma.remote_addr=impl_->remote.region_addr+slot*8;
+  wr.wr.rdma.rkey=impl_->remote.rkey;
+  ibv_send_wr* bad=nullptr;
+  if(ibv_post_send(impl_->qp.qp,&wr,&bad))fail("WRITE post");
+  impl_->qp.poll_one();
 }
 } // namespace mucql

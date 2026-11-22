@@ -1,5 +1,8 @@
 # CloudLab Apt quickstart
 
+For the exclusive-lock end-to-end test, use **[E2E.md](E2E.md)**.
+
+
 The examples use four reserved nodes: `r1`, `r2`, `r3` (RDMA acceptors) and `c1` (client). Use the **experiment network** for TCP setup and the active InfiniBand port for RDMA. GitHub is used only to distribute source and run build/tests.
 
 ## 1. Before the first run

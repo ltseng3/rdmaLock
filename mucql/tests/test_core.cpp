@@ -123,8 +123,27 @@ void thread_safe_ordering() {
   }
   Leader other(j,clk);assert(other.ordered(99).size()==q.size());
 }
+
+void malformed_double_grant_guards() {
+  MemoryJournal j;ManualClock clk;Leader l(j,clk);
+  l.join(55,909,1);l.join(55,909,2);
+  auto q=l.prepare(55,2);assert(q.size()==2);
+  Client client(909);client.on_prepared(q[0]);client.on_prepared(q[1]);
+  assert(client.activate_start(q[0],true,clk));
+  // An incorrectly authorized second START must not grant a second position
+  // to the same client while it is still holding the first.
+  assert(!client.activate_start(q[1],true,clk));
+  Ticket forged=q[0];forged.request++;
+  bool threw=false;try{client.retire(forged,q[1]);}catch(const std::logic_error&){threw=true;}
+  assert(threw);assert(client.status(q[0].grant_id)==Client::Status::Holding);
+  auto release=client.retire(q[0],q[1]);
+  assert(release.handoff);
+  assert(client.activate_handoff(*release.handoff,clk));
+  assert(!client.activate_start(q[0],true,clk));
+}
+
 int main() {
   basic_handoff();late_preparation_and_expiry();wrong_handoff_and_stale_markers();
-  bounded_pipeline();thread_safe_ordering();
+  bounded_pipeline();thread_safe_ordering();malformed_double_grant_guards();
   std::cout<<"PASS: exclusive core, recovery, stale markers, deadlines, 8-thread ordering\n";
 }

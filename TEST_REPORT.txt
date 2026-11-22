@@ -1,23 +1,45 @@
-MuCQL Stage 2 validation — developer container (no native RDMA NIC)
+Stage 3: finite-batch exclusive lock handoff, implementation validation
+Date: 2026-11-22
 
-PASS  CMake RelWithDebInfo C++17 build with mock libibverbs
-PASS  ctest: mucql_protocol
-PASS  ctest: mucql_quorum
-PASS  ctest: mucql_fault_schedules
-PASS  ctest: mucql_rdma_mock
-PASS  ctest: mucql_rdma_quorum_mock
-PASS  tools/test_tcp_quorum.sh (3 independent TCP acceptors)
+Built using CMake C++17 and the mock libibverbs transport:
+  -Wall -Wextra -Wpedantic -Werror: PASS (new lock e2e targets)
 
-New implementation under test:
-  verbs_release.cpp: RC QP setup, one-sided WRITE, 8-byte CAS,
-  CQ completion, concurrent client QPs.  Same source compiled against mocks.
-  verbs_paxos.cpp: phase-1 TCP bootstrap, QP fencing, accepted-slot scan,
-  64-byte RDMA WRITE + 8-byte CAS slot marker, parallel follower sends,
-  replica takeover and old-leader rejection. Same source compiled against mocks.
+Protocol/mock-RDMA CTest (8/8 PASS):
+  mucql_protocol
+  mucql_quorum
+  mucql_fault_schedules
+  mucql_rdma_mock
+  mucql_full_handoff_mock (48 positions, 2 workers, owner probe)
+  mucql_handoff_3clients_mock (81 positions, 3 workers, owner probe)
+  mucql_handoff_uninstrumented_mock (64 positions, 4 workers)
+  mucql_rdma_quorum_mock
 
-NOT EXECUTED / NOT PROVEN:
-  Native libibverbs compilation against actual system headers.
-  ConnectX-3 RDMA behavior, performance, QP revocation/drain races.
-  Fault-tolerant one-sided consensus under real partial partitions.
-  Clock calibration and lease semantics on Apt.
-  End-to-end SYSTEM=mucql integration or DecLock apples-to-apples goodput.
+AddressSanitizer + UndefinedBehaviorSanitizer: 8/8 PASS
+  ASAN_OPTIONS=detect_leaks=0 (test servers intentionally use process-lifetime
+  detached listener threads; this does not test leak-free daemon teardown).
+
+Three TCP acceptor/quorum smoke: PASS
+Python output parser tests: 9/9 PASS
+Bash deployment script syntax: PASS
+
+Coverage:
+  - Real acquire/retire direct handoff chain (mock verbs in a single process)
+  - One-sided 8-byte peer atomic CAS for handoff
+  - Concurrent release-marker CAS (separate QP)
+  - Synchronous protected RDMA WRITE before retirement
+  - Optional independent owner CAS (fail immediately on overlap)
+  - Coordinator verification of all release slots and final protected data
+  - No second active position for one client/lock, duplicate/stale protection
+  - Contended 2/3/4-client schedules; precommitted distributed ordering
+
+NOT validated:
+  - Native verbs build with a production libibverbs installation in this
+    container (the libibverbs development headers are absent here).
+  - Native multi-node end-to-end execution on Apt ConnectX-3 (user must run).
+  - Clock-based expiration/automatic holder crash recovery (disabled).
+  - RDMA old-leader QP fencing/takeover (experimental and disabled).
+  - Dynamic steady-state queue replenishment and DecLock SYSTEM=mucql backend.
+
+Native run requires a manual preflight of nonzero CAS old-value semantics,
+remote READ permissions, and actual InfiniBand link characteristics. The
+preflight is available as `mucql_verbs_release check HOST PORT DEVICE`.

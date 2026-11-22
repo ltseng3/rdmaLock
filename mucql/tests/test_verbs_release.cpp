@@ -18,5 +18,14 @@ int main(){
   require(server.slot_value(1)==117);
   c.post(2,200,mucql::ReleaseMode::WriteHint);require(c.complete());
   require(server.slot_value(2)==200);
+  require(c.read_slot(1)==117);
+  require(c.compare_exchange(3,0,501)==0);
+  require(server.slot_value(3)==501);
+  require(c.compare_exchange(3,0,502)==501);
+  require(server.slot_value(3)==501);
+  require(c.compare_exchange(3,501,0)==501);
+  require(server.slot_value(3)==0);
+  c.write_slot(4,777);
+  require(c.read_slot(4)==777);
   std::cout<<"RDMA release mock integration PASS\n";
 }

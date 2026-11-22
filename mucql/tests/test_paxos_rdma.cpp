@@ -1,6 +1,7 @@
 #include "mucql/verbs_paxos.hpp"
 #include "mucql/core.hpp"
 #include <iostream>
+#include <cstdlib>
 #include <thread>
 #include <chrono>
 #include <stdexcept>
@@ -31,4 +32,8 @@ int main(){
   try{a.join(7,888,1);}catch(const std::exception&){lost_leadership=true;}
   require(lost_leadership);
   std::cout<<"RDMA one-sided phase-2 simulated quorum/recovery PASS\n";
+  std::cout.flush();
+  // The mock-only acceptors are detached infinite servers; standard static
+  // destruction races them. End the isolated test process after verification.
+  std::_Exit(0);
 }

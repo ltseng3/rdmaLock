@@ -13,6 +13,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 sys.path.insert(0, str(HERE))
 import isolated_cluster as cluster
+import process_lifecycle as lifecycle
 
 
 def location(job):
@@ -115,16 +116,20 @@ def main():
         doc, _ = cluster.read(args.config)
         check_role(doc, args.role)
         existing = load_state(path)
-        if active(existing):
+        if active(existing) or lifecycle.owned_group_members(existing.get('pid'),args.job):
             raise RuntimeError('job still running: ' + args.job)
+        # A prior job must release its listeners before we launch this one.
+        lifecycle.wait_ports_free(lifecycle.role_ports(doc,args.role,cluster))
         path.mkdir(parents=True, exist_ok=True)
         for old in ('exit.json', 'state.json'):
             (path / old).unlink(missing_ok=True)
+        env=dict(os.environ)
+        env[lifecycle.JOB_ENV]=args.job
         with (path / 'stdout.log').open('w') as log:
             proc = subprocess.Popen([sys.executable, str(__file__), '--config', str(args.config.resolve()),
                                      '--job', args.job, '--role', args.role, 'supervise'],
                                     stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-                                    start_new_session=True, cwd=ROOT)
+                                    start_new_session=True, cwd=ROOT, env=env)
         if args.role in [r['id'] for r in doc['replicas']]:
             ready_token = 'RDMA Paxos acceptor listening TCP'
         elif args.role == doc['data_mn']['id']:
@@ -141,17 +146,15 @@ def main():
         print(json.dumps(snapshot(path)))
         return 0
     if args.action == 'stop':
+        doc, _ = cluster.read(args.config)
+        check_role(doc,args.role)
         state = load_state(path)
-        if active(state):
-            # Supervisor created a fresh session. Do not target other process groups.
-            os.killpg(state['pid'], signal.SIGTERM)
-            for _ in range(20):
-                if not active(state):
-                    break
-                time.sleep(0.1)
-            if active(state):
-                os.killpg(state['pid'], signal.SIGKILL)
-        print(json.dumps({'stopped': True}))
+        if state and (state.get('job')!=args.job or state.get('role')!=args.role):
+            raise RuntimeError('refusing to stop a mismatched job/role')
+        info = lifecycle.stop_owned_group(state.get('pid'),args.job)
+        # Do not equate supervisor exit with RDMA listener exit.
+        lifecycle.wait_ports_free(lifecycle.role_ports(doc,args.role,cluster))
+        print(json.dumps({'stopped': True, **info}))
         return 0
     if args.action == 'logs':
         files = {}

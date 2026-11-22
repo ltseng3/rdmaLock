@@ -112,6 +112,18 @@ class SuiteTests(unittest.TestCase):
         self.assertLess(script.index('tools/apt/setup.sh'), script.index('ensure_deps.sh auto'))
         self.assertLess(script.index('ensure_deps.sh auto'), script.index('tools/apt/build.sh'))
 
+    def test_restart_stress_expansion_and_port_budget(self):
+        spec=json.loads((Path(__file__).resolve().parents[1] /
+                         'suites/live_restart_stress.json').read_text())
+        cases=auto.expand_suite(spec, TOPO)
+        self.assertEqual(len(cases),24)
+        self.assertEqual({(c['profile'],c['trial']) for c in cases},
+                         {(p,i) for p in ('raw','full') for i in range(1,13)})
+        self.assertTrue(all(c['paxos_slots']==16384 for c in cases))
+
+    def test_lifecycle_agent_has_a_job_tag(self):
+        self.assertEqual(__import__('process_lifecycle').JOB_ENV,'MUCQL_AUTOMATION_JOB')
+
     def test_controller_ssh_exec_is_noninteractive(self):
         ex=auto.Executor(username='tsengle',checkout=Path('/tmp'),local_ips=set())
         self.assertEqual(ex.is_local({'ip':'10.10.1.1'}),False)

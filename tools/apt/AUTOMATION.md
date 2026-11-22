@@ -126,6 +126,26 @@ The automation uses TCP ports **39660, 39670, 39700, and 39711–39774** to
 avoid interfering with manually started prototype tests on the original ports.
 It refuses concurrent runs from the same controller via a lock file.
 
+**Process and port cleanup:** Each supervisor starts a separate, job-tagged
+process group. After every trial the controller terminates its child processes
+(not just the supervisor PID), verifies that role-owned TCP LISTEN ports have
+been released, and rejects a trial whose cleanup fails. Port reuse is checked
+before launching each new service. An unrelated/manual listener is reported
+with its port and an `ss` diagnostic, but is **never killed automatically**.
+If a listener persists from an older, untagged runner, inspect it on the
+affected node with `ss -ltnp 'sport = :39670'` before taking action.
+
+Run the 24-trial hardware lifecycle regression before the large sweep:
+
+```bash
+python3 tools/apt/run_suite.py --suite tools/apt/suites/live_restart_stress.json --fail-fast
+```
+
+This intentionally restarts the same live raw/full services twelve times each
+with short intervals; it tests isolation and port reuse, not publishable
+throughput. Follow it with `live_diagnostic.json` and only then consider
+`live_ablations.json` after investigating any failures.
+
 ## Important measurement scope
 
 The available modes are strictly labeled:

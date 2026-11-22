@@ -131,7 +131,14 @@ int listen_tcp(uint16_t port){
   int fd=socket(AF_INET,SOCK_STREAM,0);if(fd<0)fail("socket");
   int yes=1;setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof(yes));
   sockaddr_in addr{};addr.sin_family=AF_INET;addr.sin_port=htons(port);addr.sin_addr.s_addr=INADDR_ANY;
-  if(bind(fd,reinterpret_cast<sockaddr*>(&addr),sizeof(addr))||listen(fd,32))fail("TCP bind/listen");
+  if(bind(fd,reinterpret_cast<sockaddr*>(&addr),sizeof(addr))!=0){
+    const int error=errno;::close(fd);
+    fail("TCP bind "+std::to_string(port)+": "+std::strerror(error));
+  }
+  if(listen(fd,32)!=0){
+    const int error=errno;::close(fd);
+    fail("TCP listen "+std::to_string(port)+": "+std::strerror(error));
+  }
   return fd;
 }
 }

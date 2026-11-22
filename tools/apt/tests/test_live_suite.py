@@ -238,6 +238,22 @@ class LiveControllerLifecycleTests(unittest.TestCase):
                     self.assertEqual(node,role)
             self.assertTrue((Path(tmp)/case['id']/'coordinator'/'stdout.log').exists())
 
+    def test_cleanup_failure_rejects_otherwise_passing_trial(self):
+        class FailedCleanupRemote(self.FakeRemote):
+            def agent(self,node,*,cfg,job,role,action,timeout=20):
+                if action=='stop' and role=='mn4':
+                    raise RuntimeError('TCP listener still on port 39670')
+                return super().agent(node,cfg=cfg,job=job,role=role,
+                                     action=action,timeout=timeout)
+        fake=FailedCleanupRemote(LIVE_LINE)
+        case=self._case()
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(RuntimeError,'cleanup incomplete'):
+                runner.benchmark(fake,case,TOPO,'c'*40,'run-stop-error',
+                                 Path(tmp),7777,30)
+            self.assertEqual(len(fake.stopped),6)
+            self.assertIn('39670',(Path(tmp)/case['id']/'cleanup_error_mn4.txt').read_text())
+
     def test_invalid_result_still_cleans_every_job(self):
         bad=LIVE_LINE.replace('verified_markers=412','verified_markers=410')
         fake=self.FakeRemote(bad)

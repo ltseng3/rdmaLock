@@ -408,6 +408,10 @@ def benchmark(ex, case, topology, commit, session, run_root, ballot, timeout):
             row['ordered_entries_per_sec'] = summary['ordered_entries_per_sec']
         return row
     finally:
+        # A PASS is invalid if an old listener will collide with the next case.
+        # Preserve the original error when a trial already failed.
+        failed_before_cleanup = sys.exc_info()[0] is not None
+        cleanup_failures = []
         # Never pkill by a program name; only stop jobs started by this session.
         # Collect logs even on error when available.
         for node, role, jid in reversed(jobs):
@@ -425,6 +429,9 @@ def benchmark(ex, case, topology, commit, session, run_root, ballot, timeout):
                 ex.agent(node, cfg=cfg_name, job=jid, role=role, action='stop', timeout=15)
             except Exception as exc:
                 (case_dir / ('cleanup_error_'+role+'.txt')).write_text(str(exc))
+                cleanup_failures.append(role+': '+str(exc))
+        if cleanup_failures and not failed_before_cleanup:
+            raise RuntimeError('trial cleanup incomplete; refusing PASS: '+'; '.join(cleanup_failures))
 
 
 def summarize(rows, path):

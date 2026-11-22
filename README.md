@@ -2,6 +2,21 @@
 
 C++17 utilities for ordered queue entries, one-sided RDMA transport, and repeatable throughput smoke tests.
 
+## One-command CloudLab benchmarks
+
+From a dashboard terminal on MN4 (after configuring real CN IPs in
+`tools/apt/topology.json` and enabling node-to-node SSH):
+
+```bash
+cd ~/rdmaLock && git pull --ff-only && python3 tools/apt/run_suite.py
+```
+
+This deploys the exact repository commit, builds all machines, runs the JSON
+smoke-test matrix, verifies outcomes and gathers CSV/log files locally.
+[Configuration and larger test suites](tools/apt/AUTOMATION.md).
+**Scope:** current automation supports fixed-batch tests only; output is not
+labeled as steady-state DecLock-comparable throughput.
+
 ## Dedicated CN nodes and batched ordering
 
 The Apt launcher accepts a JSON topology with separate replica, memory, and client nodes, and can start multiple independent worker processes on each CN. The ordering fast path supports up to 32 in-flight contiguous log entries per replica. [Dashboard commands](tools/apt/ISOLATED.md). The current lock test remains finite-batch; continuous request admission is not yet implemented.

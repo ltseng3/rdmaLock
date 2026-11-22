@@ -20,8 +20,17 @@ ID = re.compile(r"^[a-zA-Z][a-zA-Z0-9_-]{0,30}$")
 
 
 def validate(doc):
-    if set(doc) != {"device", "ib_port", "replicas", "data_mn", "clients", "benchmark"}:
-        raise ValueError("topology requires exactly device, ib_port, replicas, data_mn, clients, benchmark")
+    required = {"device", "ib_port", "replicas", "data_mn", "clients", "benchmark"}
+    if not required.issubset(doc) or set(doc) - required - {"ports"}:
+        raise ValueError("topology requires device, ib_port, replicas, data_mn, clients, benchmark; optional ports")
+    ports = doc.get("ports", {"ordering":29660,"data":29670,"coordinator":29700,"worker_base":29711})
+    if set(ports) != {"ordering", "data", "coordinator", "worker_base"}:
+        raise ValueError("ports requires ordering, data, coordinator, worker_base")
+    if any(type(p) is not int or p < 1024 or p > 64000 for p in ports.values()):
+        raise ValueError("ports must be valid high TCP ports")
+    all_ports=[ports["ordering"],ports["data"],ports["coordinator"]]+list(range(ports["worker_base"],ports["worker_base"]+64))
+    if len(set(all_ports))!=len(all_ports):
+        raise ValueError("ports overlap each other or worker port range")
     if not re.fullmatch(r"[a-zA-Z0-9_.-]{1,32}", doc["device"]):
         raise ValueError("invalid IB device name")
     if doc["ib_port"] not in (1, 2):
@@ -106,23 +115,24 @@ def commands(doc, role, *, ballot=None, positions=None, batch=None, probe=None, 
     base = [str(ROOT / "mucql" / "build-apt")]
     binary = lambda s: str(Path(base[0]) / s)
     dev = doc["device"]
+    ports = doc.get("ports", {"ordering":29660,"data":29670,"coordinator":29700,"worker_base":29711})
     if role == "coordinator":
-        return [[binary("mucql_lock_e2e"), "coordinator", "29700", str(b["ballot"]),
-                 str(b["positions"]), str(total), dat["ip"] + ":29670",
-                 *(n["ip"] + ":29660" for n in r), dev, str(b["probe"]), str(b["work_ns"])]]
+        return [[binary("mucql_lock_e2e"), "coordinator", str(ports["coordinator"]), str(b["ballot"]),
+                 str(b["positions"]), str(total), dat["ip"] + ":" + str(ports["data"]),
+                 *(n["ip"] + ":" + str(ports["ordering"]) for n in r), dev, str(b["probe"]), str(b["work_ns"])]]
     if role == "ordering":
         return [[binary("mucql_rdma_paxos"), "client", str(b["ballot"]),
-                 str(b["positions"]), *(n["ip"] + ":29660" for n in r),
+                 str(b["positions"]), *(n["ip"] + ":" + str(ports["ordering"]) for n in r),
                  dev, str(b["order_batch"])]]
     if role not in nodes:
         raise ValueError(f"unknown node {role}; valid: {', '.join(nodes)} or coordinator/ordering")
     if role in [n["id"] for n in r]:
-        return [[binary("mucql_rdma_paxos"), "server", "29660", dev]]
+        return [[binary("mucql_rdma_paxos"), "server", str(ports["ordering"]), dev]]
     if role == dat["id"]:
-        return [[binary("mucql_verbs_release"), "server", "29670", dev, "4096"]]
+        return [[binary("mucql_verbs_release"), "server", str(ports["data"]), dev, "4096"]]
     cn = nodes[role]
-    return [[binary("mucql_lock_e2e"), "worker", dat["ip"] + ":29700",
-             str(i), cn["ip"], str(29711 + i), dev] for i in workers_for(doc, role)]
+    return [[binary("mucql_lock_e2e"), "worker", dat["ip"] + ":" + str(ports["coordinator"]),
+             str(i), cn["ip"], str(ports["worker_base"] + i), dev] for i in workers_for(doc, role)]
 
 
 def show(doc, total):

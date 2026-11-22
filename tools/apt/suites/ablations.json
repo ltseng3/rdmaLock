@@ -1,0 +1,7 @@
+{
+  "tests": [
+    {"name":"ordering-batches", "kind":"ordering_micro", "batches":[1,8,16,32], "positions":[2048], "repetitions":5},
+    {"name":"handoff-scaling", "kind":"prepared_e2e", "cn_counts":"powers_of_two", "workers_per_cn":[1,2,4], "positions":[2048], "batches":[1,8,16,32], "probes":[0], "work_ns":[0,1000], "repetitions":5},
+    {"name":"handoff-safety", "kind":"prepared_e2e", "cn_counts":"powers_of_two", "workers_per_cn":[1,4], "positions":[2048], "batches":[1,32], "probes":[1], "work_ns":[0], "repetitions":3}
+  ]
+}

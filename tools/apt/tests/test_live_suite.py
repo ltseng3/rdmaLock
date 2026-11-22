@@ -28,7 +28,8 @@ LIVE_LINE=('LIVE_E2E status=PASS scope=live_steady_state workers=2 locks=1 zipf=
            'join_batches=412 actual_join_batch_mean=1 prepare_records=412 '
            'latency_p50_ns=1000 latency_p95_ns=5000 latency_p99_ns=9000 '
            'admission_p50_ns=400 admission_p99_ns=1000 handoff_wait_p99_ns=2000 '
-           'goodput_ops_per_sec=614 transport=rdma probe=1 work_ns=0')
+           'goodput_ops_per_sec=614 transport=rdma probe=1 work_ns=0 '
+           'data_ops=1 data_size_bytes=8 read_ratio=0 data_writes_measured=307')
 
 
 class LiveSuiteTests(unittest.TestCase):
@@ -62,6 +63,7 @@ class LiveSuiteTests(unittest.TestCase):
                          {('raw',1),('raw',2),('full',1),('full',2)})
         cfg=runner.case_topology(TOPO,cases[0],7777)
         self.assertEqual(cfg['benchmark']['mode'],'live')
+        self.assertEqual(cfg['benchmark']['data_ops'],1)
         self.assertEqual(cfg['benchmark']['cn_transport'],'rdma')
         self.assertEqual(cfg['benchmark']['ballot'],7777)
         self.assertEqual(cfg['benchmark']['measure_ms'],500)
@@ -93,6 +95,9 @@ class LiveSuiteTests(unittest.TestCase):
                     LIVE_LINE.replace('joins=412','joins=413'),
                     LIVE_LINE.replace('goodput_ops_per_sec=614','goodput_ops_per_sec=nan'),
                     LIVE_LINE.replace('scope=live_steady_state','scope=precommitted_handoff'),
+                    LIVE_LINE.replace('data_writes_measured=307','data_writes_measured=306'),
+                    LIVE_LINE.replace('data_size_bytes=8','data_size_bytes=16'),
+                    LIVE_LINE.replace('read_ratio=0','read_ratio=50'),
                     LIVE_LINE+'\n'+LIVE_LINE]:
             with self.assertRaises(ValueError):runner.parse_summary('live_e2e',bad)
 
@@ -161,6 +166,54 @@ class LiveSuiteTests(unittest.TestCase):
             self.assertEqual(len(a),2)
             self.assertEqual({z['transport'] for z in a},{'tcp','rdma'})
             self.assertEqual({z['median_speedup'] for z in a},{'2.0000'})
+
+    def test_matched_declock_workload_suite_shapes_and_safety(self):
+        for filename, expected, probe in [
+            ('live_declock_hot_smoke.json',24,1),
+            ('live_declock_hot_match.json',60,0),
+            ('live_declock_skew_match.json',36,0)]:
+            with self.subTest(suite=filename):
+                spec=json.loads((HERE/'suites'/filename).read_text())
+                cases=runner.expand_suite(spec,TOPO)
+                self.assertEqual(len(cases),expected)
+                self.assertEqual(len({c['id'] for c in cases}),expected)
+                self.assertEqual({c['data_ops'] for c in cases},{1,32})
+                self.assertEqual({c['probe'] for c in cases},{probe})
+                self.assertEqual({c['transport'] for c in cases},{'rdma'})
+                self.assertEqual({c['work_ns'] for c in cases},{0})
+                self.assertEqual({c['cn_count'] for c in cases},{2})
+                self.assertTrue(all(runner.case_topology(TOPO,c,4101)['benchmark']['data_ops']==c['data_ops']
+                                    for c in cases))
+        for n in (0,33,1.5):
+            with self.assertRaises(ValueError):
+                runner.expand_suite({'tests':[dict(BASE,data_ops=[n])]},TOPO)
+
+    def test_data_ops_prevents_invalid_cross_workload_aggregation(self):
+        rows=[]
+        for shots in (1,32):
+            for profile_name in ('raw','full'):
+                rows.append(dict(kind='live_e2e',scenario='match',transport='rdma',
+                    cn_nodes=2,worker_processes=16,positions=2048,batch=1,
+                    lock_count=1,distribution='uniform',work_ns=0,
+                    data_ops=shots,data_size_bytes=8,read_ratio=0,
+                    probe=0,warmup_ms=0,measure_ms=2000,seed=2026,
+                    profile=profile_name,trial=1,status='PASS',goodput_ops_per_sec=
+                    str(shots*(100 if profile_name=='raw' else 150))))
+        with tempfile.TemporaryDirectory() as d:
+            summary=Path(d)/'summary.csv'
+            runner.summarize(rows,summary)
+            with summary.open() as f:
+                entries=list(csv.DictReader(f))
+            self.assertEqual(len(entries),4)
+            self.assertEqual({int(x['data_ops']) for x in entries},{1,32})
+            paired=Path(d)/'ablations.csv'
+            runner.write_ablations(rows,paired)
+            with paired.open() as f:
+                effects=[x for x in csv.DictReader(f)
+                         if x['effect']=='Combined optimization vs raw']
+            self.assertEqual(len(effects),2)
+            self.assertEqual({x['data_ops'] for x in effects},{'1','32'})
+            self.assertEqual({x['median_speedup'] for x in effects},{'1.5000'})
 
     def test_run_matrix_bounds(self):
         spec=json.loads((HERE/'suites/live_ablations.json').read_text())

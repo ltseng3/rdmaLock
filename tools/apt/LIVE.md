@@ -116,6 +116,81 @@ its logs and do not interpret TCP results as proof that the RDMA path works.
 The test mock models registered buffer ownership and CQ completions but
 **cannot validate real mlx4 RNR, CQ ordering, MR registration, or RNIC timing**.
 
+## DecLock-style exclusive critical-section comparison
+
+The live worker now supports **\`data_ops\` = 1..32**, exactly that many
+sequential **8-byte one-sided RDMA WRITEs**, each waited to successful CQ
+completion, while it holds an exclusive lock. Every operation targets the
+per-key protected data slot on MN4 and writes the unique grant ID; the final
+value is verified after completion. The existing \`work_ns\` option is CPU
+busy-work and **is not** a DecLock substitute. Zero read ratio is intentional:
+MuCQL currently implements exclusive locks, not shared-reader semantics.
+
+This matches DecLock's \`MICROBENCH_SHOT_NUM\` loop in
+\`tests/workload/micro.h\`, with \`MICROBENCH_DATA_SIZE=8\`,
+\`read_ratio=0\`, \`locality=0\`, one coroutine per core, and the number
+of RDMA completions matching \`data_ops\`. Both workloads access one 8-byte
+location per lock. The lock algorithms and resource footprint differ: MuCQL
+uses 3 Paxos MNs + MN4, while DecLock uses a single MN. This difference must
+be reported and **must not** be hidden by a shared "apples-to-apples" label.
+
+Each LIVE trial now reports and validates
+\`data_ops\`, \`data_size_bytes=8\`, \`read_ratio=0\`, and
+\`data_writes_measured=measured*data_ops\`. Run summaries and ablations group
+by these fields, so 1-write and 32-write trials cannot be merged. The counter
+validates **posted-and-completed** write-loop semantics, not RNIC hardware
+counters. Unlike DecLock's \`request throughput\` attempt counter, compare
+only **successful completed lock cycles** and refuse the baseline unless its
+goodput instrumentation is installed.
+
+### Run these one at a time on Node 4
+
+\`\`\`bash
+cd ~/rdmaLock && git pull --ff-only
+python3 tools/apt/run_suite.py --suite tools/apt/suites/live_declock_hot_smoke.json --fail-fast
+python3 tools/apt/run_suite.py --suite tools/apt/suites/live_declock_hot_match.json --fail-fast
+python3 tools/apt/run_suite.py --suite tools/apt/suites/live_declock_skew_match.json --fail-fast
+\`\`\`
+
+**Start with the 24-trial smoke suite** (2 CN × 4/8 workers each, 1 hot lock,
+data_ops=1/32, raw/full_no_join/full, 2 trials, probe enabled).
+If it succeeds, the 60-trial matched suite measures the same conditions with
+probe disabled, **0 ms warmup and 2,000 ms measurement** (five repetitions),
+matching DecLock's unmodified \`TEST_TIME_MS=2000\`. The optional 36-trial
+skew suite uses 16 writers and 8, 64, or 1000 keys at Zipf alpha 0.99, with
+the same two durations and 1/32 writes. All runs use RDMA SEND/RECV for
+client admission and one-sided RDMA for the data writes.
+
+**Do not invoke the 320-case suite** or treat these MuCQL-only numbers as
+a measured DecLock comparison. Run the upstream \`dracit7/declock\` benchmark
+on the same MN4 and CNs, with one coroutine/core, 0% reads, the same lock
+count and writes, on the same RNICs. Pin exact git revisions. Our helper
+\`tools/apt/declock_match_plan.py\` can generate an exact DecLock command
+manifest and per-host \`set-env.sh\` template without modifying the baseline.
+DecLock's \`dmlock\` variant is PF; \`dmlock_tf\` is TF. Before comparing
+goodput, apply \`tools/patch_declock_benchmark.py\` to the external DecLock
+checkout, rebuild both variants, and parse its **successful lock throughput**
+rather than its legacy attempt counter. Validate SSH, dependencies, pinning,
+and benchmark launch on hardware; no DecLock hardware run has been performed
+by GitHub CI. Do not run MuCQL and DecLock concurrently.
+
+### Interpretation caveats
+
+* One lock is maximally contended and uniform/Zipf are indistinguishable.
+* With multiple keys, both systems use Zipf alpha 0.99 but different seeded
+  PRNG implementations; therefore a statistical workload match, not an
+  identical request trace. Key heat and client affinity should be measured.
+* MuCQL uses one independent worker process per outstanding request; DecLock
+  uses one coroutine/core. Align **active requests**, actual CPU allocations,
+  one-way network links, and measured read ratio before calling results
+  performance-comparable.
+* The data write loop is included in MuCQL's timed end-to-end latency;
+  the release marker and replicated JOIN/PREPARE decisions are not subtracted.
+* The 2,000 ms, zero-warmup matching suite is a direct artifact duration
+  match; do not mix it with earlier 1,000 ms/500 ms smoke trials.
+* Software mock verbs never demonstrate actual mlx4 RDMA completion behavior.
+  First prove correctness with the safety-probed hardware suite.
+
 ## Named optimization profiles
 
 Each profile resolves to an immutable set of six knobs in

@@ -52,9 +52,9 @@ struct Hello {uint64_t magic,index,port;char ip[64];};
 struct Peer {uint64_t port;char ip[64];};
 struct Options {uint64_t ballot{},max_ops{},workers{},lock_count{1},join_aggregate{1},phase2_window{1},
   prepare_range{1},lookahead{2},replenish_threshold{1},batch_wait_us{0},probe{0},work_ns{0},warmup_ms{200},measure_ms{500},
-  seed{2026},zipf{0},paxos_slots{4096};};
+  seed{2026},zipf{0},paxos_slots{4096},data_ops{1};};
 struct Config {uint64_t magic,workers,self,lock_count,max_ops,paxos_slots,probe,work_ns,
-  warmup_ms,measure_ms,seed,zipf,transport;uint64_t data_port;char data_host[64];};
+  warmup_ms,measure_ms,seed,zipf,transport,data_ops;uint64_t data_port;char data_host[64];};
 struct EndlessClock:Clock {Bounds now() const override{return {0,0};}};
 struct Event {size_t worker;Message m;};
 bool rdma_admission(){
@@ -139,6 +139,7 @@ void validate(const Options& o){
      o.prepare_range>o.lookahead||o.replenish_threshold<1||
      o.replenish_threshold>o.lookahead||o.batch_wait_us>5000||o.probe>1||o.work_ns>1000000000||
      o.warmup_ms>60000||o.measure_ms<50||o.measure_ms>120000||o.zipf>1||
+     o.data_ops<1||o.data_ops>32||
      o.paxos_slots<4096||o.paxos_slots>kMaxSlots||o.max_ops<o.workers||
      o.max_ops>o.paxos_slots-o.paxos_slots/64||release_slots(o)>2000000)
       fail("invalid LIVE options or insufficient write-once log capacity");
@@ -172,6 +173,9 @@ int coordinator(int argc,char**argv){
   o.seed=number(argv[23],1,UINT64_MAX,"seed");
   // MUCQL_PAXOS_SLOTS is shared with acceptors; this prevents CLI sprawl.
   if(const char* s=getenv("MUCQL_PAXOS_SLOTS"))o.paxos_slots=number(s,4096,kMaxSlots,"paxos_slots");
+  // Matches DecLock MICROBENCH_SHOT_NUM: one signaled, completed 8-byte
+  // RDMA WRITE per shot, within the held exclusive-lock critical section.
+  if(const char* s=getenv("MUCQL_DATA_OPS"))o.data_ops=number(s,1,32,"data_ops");
   validate(o);
   const bool control_rdma=rdma_admission();
   int listenfd=listen_tcp(port);
@@ -198,7 +202,7 @@ int coordinator(int argc,char**argv){
     Config c{};c.magic=kMagic;c.workers=o.workers;c.self=w;c.lock_count=o.lock_count;
     c.max_ops=o.max_ops;c.paxos_slots=o.paxos_slots;c.probe=o.probe;c.work_ns=o.work_ns;
     c.warmup_ms=o.warmup_ms;c.measure_ms=o.measure_ms;c.seed=o.seed;c.zipf=o.zipf;
-    c.transport=control_rdma?1:0;
+    c.transport=control_rdma?1:0;c.data_ops=o.data_ops;
     c.data_port=data_port;host_to(c.data_host,data_host);
     send_exact(sockets[w],&c,sizeof(c));send_exact(sockets[w],peers.data(),sizeof(Peer)*peers.size());
   }
@@ -343,6 +347,8 @@ int coordinator(int argc,char**argv){
     if(measured==0)fail("no measured completions");
     std::cout<<"LIVE_E2E status=PASS scope=live_steady_state workers="<<o.workers
       <<" locks="<<o.lock_count<<" zipf="<<o.zipf
+      <<" read_ratio=0 data_size_bytes=8 data_ops="<<o.data_ops
+      <<" data_writes_measured="<<(measured*o.data_ops)
       <<" warmup_ms="<<o.warmup_ms<<" measure_ms="<<o.measure_ms
       <<" completed="<<done<<" measured="<<measured<<" joins="<<joined
       <<" verified_markers="<<completed.size()<<" violations=0"
@@ -414,7 +420,10 @@ int worker(int argc,char**argv){
   LiveControlChannel channel(fd,device,control_port(),control_rdma,sizeof(Message));
   Options o{};o.paxos_slots=slots;o.lock_count=cfg.lock_count;o.work_ns=cfg.work_ns;
   o.probe=cfg.probe;o.warmup_ms=cfg.warmup_ms;o.measure_ms=cfg.measure_ms;
-  o.seed=cfg.seed;o.zipf=cfg.zipf;o.max_ops=cfg.max_ops;
+  o.seed=cfg.seed;o.zipf=cfg.zipf;o.max_ops=cfg.max_ops;o.data_ops=cfg.data_ops;
+  if(o.data_ops<1||o.data_ops>32)fail("bad LIVE data_ops in coordinator config");
+  if(const char* n=getenv("MUCQL_DATA_OPS"))
+    if(number(n,1,32,"data_ops")!=o.data_ops)fail("worker/coordinator data_ops mismatch");
   VerbsReleaseClient release(host_of(cfg.data_host),uint16_t(cfg.data_port),release_opts(device,release_slots(o)));
   std::unique_ptr<VerbsReleaseClient> probe;
   if(o.probe)probe=std::make_unique<VerbsReleaseClient>(host_of(cfg.data_host),uint16_t(cfg.data_port),release_opts(device,release_slots(o)));
@@ -500,7 +509,12 @@ int worker(int argc,char**argv){
       }
       if(!client.may_use(t,EndlessClock{}))fail("lock ownership denied");
       if(probe&&probe->compare_exchange(owner_slot(o,t.lock),0,t.grant_id)!=0)fail("MUTUAL EXCLUSION VIOLATION");
-      release.write_slot(data_slot(o,t.lock),t.grant_id);
+      // DecLock's exclusive microbenchmark submits N sequential 8-byte
+      // RDMA WRITEs and waits for each CQ completion while holding the lock.
+      // Every WRITE targets the protected per-key value on the data MN.
+      // This is actual RNIC activity, not a local CPU delay.
+      for(uint64_t shot=0;shot<o.data_ops;++shot)
+        release.write_slot(data_slot(o,t.lock),t.grant_id);
       if(o.work_ns)busy_for(o.work_ns);
       if(probe&&probe->compare_exchange(owner_slot(o,t.lock),t.grant_id,0)!=t.grant_id)fail("owner slot changed");
       auto action=client.retire(t,std::nullopt);

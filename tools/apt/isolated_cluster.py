@@ -69,6 +69,9 @@ def validate(doc):
     if mode == "live":
         if bench.get("cn_transport","rdma") not in ("rdma","tcp"):
             raise ValueError("live cn_transport must be rdma or tcp")
+        shots=bench.get("data_ops",1)
+        if type(shots) is not int or shots<1 or shots>32:
+            raise ValueError("live data_ops must be an integer 1..32 (8-byte completed RDMA WRITEs)")
         for name, lo, hi in (("max_ops", total, 1_000_000), ("paxos_slots", 4096, 1_000_000),
                              ("locks", 1, 4096), ("join_aggregate", 1, 32),
                              ("phase2_window", 1, 32), ("prepare_range", 1, 128),
@@ -173,7 +176,9 @@ def show(doc, total):
     print(f"  {d['id']:12s} {d['ip']:15s} role=data MN + coordinator (NO CLIENTS)")
     for n in doc["clients"]:
         print(f"  {n['id']:12s} {n['ip']:15s} role=CN workers={n['workers']} ids={workers_for(doc,n['id'])}")
-    print("NOTICE: Current E2E is PRECOMMITTED fixed-batch, not continuous ordering+handoff; not DecLock-comparable goodput.")
+    print("NOTICE: Live mode performs CN-admitted, RDMA-controlled continuous ordering and handoff.")
+    print("For DecLock comparisons use identical exclusive-lock and per-key completed RDMA WRITE workloads.")
+    print("DecLock and MuCQL provide different durability/failure assumptions; disclose replica count.")
 
 
 def main():
@@ -203,6 +208,7 @@ def main():
     if doc["benchmark"].get("mode") == "live":
         env["MUCQL_PAXOS_SLOTS"] = str(doc["benchmark"]["paxos_slots"])
         env["MUCQL_CN_TRANSPORT"] = doc["benchmark"].get("cn_transport","rdma")
+        env["MUCQL_DATA_OPS"] = str(doc["benchmark"].get("data_ops",1))
     for line in cmds:
         print("MUCQL_IB_PORT=" + str(doc["ib_port"]) + " " + shlex.join(line), flush=True)
     if args.action == "print":

@@ -1,0 +1,46 @@
+{
+  "seed": 2026,
+  "shuffle": true,
+  "tests": [
+    {
+      "name": "declock-hot-exclusive-match",
+      "kind": "live_e2e",
+      "profiles": [
+        "raw",
+        "full_no_join",
+        "full"
+      ],
+      "transports": [
+        "rdma"
+      ],
+      "cn_counts": [
+        2
+      ],
+      "workers_per_cn": [
+        4,
+        8
+      ],
+      "locks": [
+        1
+      ],
+      "distributions": [
+        "uniform"
+      ],
+      "probes": [
+        0
+      ],
+      "work_ns": [
+        0
+      ],
+      "data_ops": [
+        1,
+        32
+      ],
+      "warmup_ms": 0,
+      "measure_ms": 2000,
+      "paxos_slots": 524288,
+      "max_ops": 450000,
+      "repetitions": 5
+    }
+  ]
+}

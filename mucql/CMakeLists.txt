@@ -127,4 +127,14 @@ set_tests_properties(mucql_live_hot_raw mucql_live_hot_optimized
   mucql_live_multilock mucql_live_uninstrumented
   mucql_live_16clients_hot_mock mucql_live_16clients_zipf_mock
   PROPERTIES ENVIRONMENT "MUCQL_CN_TRANSPORT=tcp")
+  # 32 sequential completed 8-byte writes per exclusive critical section,
+  # exercising the same RNIC write-count dimension as DecLock exec-time.
+  add_test(NAME mucql_live_rdma_many_data_writes_mock
+      COMMAND mucql_live_mock_test 16 1 1 1 1 2 0 1)
+  add_test(NAME mucql_live_rdma_many_data_writes_skew_mock
+      COMMAND mucql_live_mock_test 16 64 8 8 8 64 1 1)
+  set_tests_properties(mucql_live_rdma_many_data_writes_mock
+      mucql_live_rdma_many_data_writes_skew_mock
+      PROPERTIES ENVIRONMENT "MUCQL_CN_TRANSPORT=rdma;MUCQL_DATA_OPS=32"
+                 TIMEOUT 45 RUN_SERIAL TRUE)
 endif()

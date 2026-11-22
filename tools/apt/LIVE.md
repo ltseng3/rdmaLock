@@ -170,7 +170,28 @@ manifest and per-host \`set-env.sh\` template without modifying the baseline.
 DecLock's \`dmlock\` variant is PF; \`dmlock_tf\` is TF. Before comparing
 goodput, apply \`tools/patch_declock_benchmark.py\` to the external DecLock
 checkout, rebuild both variants, and parse its **successful lock throughput**
-rather than its legacy attempt counter. Validate SSH, dependencies, pinning,
+rather than its legacy attempt counter. DecLock's `LLOG` writes this metric
+to **stderr**. Capture the full `run-on-all.sh` stderr/stdout output (as
+upstream `getresults.sh` does in `tmp`), verify both CNs exited, then run:
+
+```bash
+python3 tools/apt/parse_declock_goodput.py --cores-per-cn 8 /path/to/combined-run.stderr.log
+```
+
+A log containing only `request throughput` is rejected, as is a missing,
+duplicate, or partially collected core. Do **not** parse the remote CN
+stdout latency files as goodput. Example planning command (does NOT run jobs):
+
+```bash
+python3 tools/apt/declock_match_plan.py --declock-dir ~/declock \
+    --workers-per-cn 8 --locks 1 --data-ops 1 --data-ops 32
+```
+
+This writes `results/declock_match_plan/cases.json`,
+`commands.txt`, and `set-env.sh` for review. Install the environment
+on MN4/CN1/CN2 only after checking hostnames/SSH and verifying that
+the same upstream pinned source and rebuilt binary are present on all
+three nodes. Run one baseline at a time. Validate SSH, dependencies, pinning,
 and benchmark launch on hardware; no DecLock hardware run has been performed
 by GitHub CI. Do not run MuCQL and DecLock concurrently.
 

@@ -121,14 +121,14 @@ def main():
         'notes':['Requires external DecLock repo and prerequisites installed on MN4/CN1/CN2',
                  'No RDMA benchmark is launched by this generator',
                  'Do not compare request throughput (attempt count); use successful completed cycles',
-                 'DecLock requires separate per-CN logs and checked 2-second completion',
+                 'DecLock requires a captured run-on-all.sh stderr log, separately checked 2-second completion, and remote latency logs',
                  'MuCQL uses three additional Paxos MNs, DecLock uses one MN',
                  'DecLock and MuCQL Zipf generators differ despite alpha 0.99'],
         'cases':cases,
     },indent=2)+'\n')
     (out/'commands.txt').write_text(''.join(
         f'# {c["id"]} | assert git HEAD = {c["artifact_commit"]}; '
-        f'collect and validate CN logs before next trial\n'+
+        f'capture run-on-all stderr and validate both CN exits before next trial\n'+
         'cd '+shlex.quote(c['cwd'])+' && '+
         shlex.join(c['argv'])+'\n' for c in cases))
     print(f'Generated {len(cases)} DecLock run commands in {out}')

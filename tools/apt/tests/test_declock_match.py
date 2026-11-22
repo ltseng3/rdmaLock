@@ -73,6 +73,14 @@ class DecLockGoodputTests(unittest.TestCase):
         self.assertFalse(result['request_attempts_used'])
         self.assertNotEqual(result['goodput_ops_per_sec'],36_000_000)
 
+    def test_combined_stderr_log_with_info_prefix(self):
+        stderr='[Info]'+self.sample(1,0.0001).replace('[host','[Info][host')
+        stderr+=self.sample(2,0.0002).replace('[host','[Info][host')
+        result=parse.parse([stderr],2)
+        self.assertEqual(result['workers'],4)
+        self.assertEqual(result['goodput_ops_per_sec'],600)
+        self.assertEqual(result['status'],'PARSED_ONLY')
+
     def test_reject_unpatched_duplicate_partial_and_invalid_counts(self):
         a=self.sample(1,0.0001)
         b=self.sample(2,0.0001)

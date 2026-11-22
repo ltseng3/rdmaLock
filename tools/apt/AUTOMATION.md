@@ -8,7 +8,15 @@ public repository pinned to the exact same commit on every host.
 
 ## One-time configuration
 
-Edit [`topology.json`](topology.json): keep the three `replicas` and `data_mn`
+Copy the tracked example to a local override on the **controller node**:
+
+```bash
+cp tools/apt/topology.json tools/apt/topology.local.json
+nano tools/apt/topology.local.json
+```
+
+Edit `topology.local.json` (git-ignored, automatically preferred if present):
+keep the three `replicas` and `data_mn`
 on distinct hosts, set the real experiment IPs for `clients`, and specify
 physical cores per CN. The supplied `.5`/`.6` CN addresses are **examples**,
 not verified reservations. You can add CNs to the list; suite expansion will
@@ -25,7 +33,9 @@ SSH authentication. If this fails, configure your CloudLab user key or agent
 forwarding through normal CloudLab facilities. The automation will not disable
 SSH authentication, copy SSH private keys, or require GitHub credentials.
 
-The nodes need git, cmake, libibverbs and an active mlx4 InfiniBand port.
+The controller sends each trial configuration to all nodes automatically; only
+the controller needs `topology.local.json`. The nodes need git, cmake, libibverbs
+and an active mlx4 InfiniBand port.
 If dependencies aren't installed, run once with `--install-deps` (requires
 passwordless sudo on the target hosts). Run from the same user account on all
 hosts, or pass `--ssh-user NAME`.

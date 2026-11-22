@@ -4,8 +4,9 @@ C++17 utilities for ordered queue entries, one-sided RDMA transport, and repeata
 
 ## One-command CloudLab benchmarks
 
-From a dashboard terminal on MN4 (after configuring real CN IPs in
-`tools/apt/topology.json` and enabling node-to-node SSH):
+From a dashboard terminal on MN4 (after copying `tools/apt/topology.json`
+to `tools/apt/topology.local.json`, setting your CN IPs there, and enabling
+node-to-node SSH):
 
 ```bash
 cd ~/rdmaLock && git pull --ff-only && python3 tools/apt/run_suite.py

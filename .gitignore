@@ -28,3 +28,6 @@ id_rsa
 .DS_Store
 
 *.pid
+
+# Local CloudLab host overrides (keep off public GitHub)
+tools/apt/topology.local.json

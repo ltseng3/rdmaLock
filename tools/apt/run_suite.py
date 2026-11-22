@@ -330,7 +330,7 @@ def summarize(rows, path):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument('--topology', type=Path, default=HERE/'topology.json')
+    ap.add_argument('--topology', type=Path, default=(HERE/'topology.local.json' if (HERE/'topology.local.json').exists() else HERE/'topology.json'))
     ap.add_argument('--suite', type=Path, default=HERE/'suites/smoke.json')
     ap.add_argument('--ssh-user', default=os.environ.get('USER', ''))
     ap.add_argument('--remote-dir', default=WORKDIR)
@@ -371,16 +371,17 @@ def main():
         fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         raise RuntimeError('another automation suite is already active on this controller')
+    session = dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ') + f'-{os.getpid()}'
+    root = ROOT/'results'/'automation'/session
+    (root/'bootstrap').mkdir(parents=True)
     print('Checking SSH and building exact commit',sha,flush=True)
     for node in needed:
         executor.shell(node, 'hostname && id -un', timeout=18)
         out = executor.bootstrap(node, sha, topo['device'], topo['ib_port'], install_deps=args.install_deps)
+        (root/'bootstrap'/f'{node["id"]}.log').write_text(out)
         print(f'  {node["id"]}: build and verbs check OK ({len(out)} chars)',flush=True)
     if args.bootstrap_only:
         return 0
-    session = dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ') + f'-{os.getpid()}'
-    root = ROOT/'results'/'automation'/session
-    root.mkdir(parents=True)
     (root/'manifest.json').write_text(json.dumps({'commit':sha,'topology':topo,'suite':str(args.suite),
                                                   'cases':cases,'measurement_scope':'NOT_COMPARABLE_TO_DECLOCK'},indent=2))
     summary_csv = root/'runs.csv'

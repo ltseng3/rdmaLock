@@ -1,7 +1,8 @@
 # Live MuCQL: bounded CN-admitted benchmark and optimization ablations
 
 This benchmark is an **online, failure-free exclusive-lock** experiment. Dedicated
-compute-node (CN) processes issue actual JOIN requests over TCP. The ordering
+compute-node (CN) processes issue actual JOIN requests over two-sided RDMA
+SEND/RECV by default, with TCP available as a matched transport control. The ordering
 leader commits JOIN and PREPARE records to three RDMA acceptors while clients
 execute protected RDMA WRITEs and hand off ownership directly using one-sided
 CAS. A successfully completed CN request includes acquisition, one completed
@@ -53,10 +54,11 @@ RDMA. Results include a mandatory `transport` column and never merge TCP
 with RDMA observations. Any live suite without a transport axis defaults to
 `"rdma"`.
 
-The former CN-to-coordinator TCP path was the prototype baseline, while replica ordering,
-protected data operations, and client handoffs use RDMA. TCP admission and the
-leader's release-marker RDMA READ are part of the measured cost. Never describe
-RDMA SEND/RECV admission as one-sided or subtract its cost.
+The former CN-to-coordinator TCP path remains an explicitly selectable
+baseline. Replica ordering, protected data operations and direct ownership
+handoffs use one-sided RDMA in either mode. The leader's release-marker RDMA
+READ is charged to measured throughput. The selected client admission and
+notification transport is charged to request latency; do not subtract it.
 
 ## Focused transport and preparation diagnostic (before the 320-case suite)
 

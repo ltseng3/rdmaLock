@@ -93,7 +93,16 @@ class LifecycleTests(unittest.TestCase):
             try:
                 proc.wait(timeout=5)
                 child_pid=int(path.read_text())
-                port=int(portfile.read_text())
+                deadline=time.monotonic()+2
+                port_text=''
+                while time.monotonic()<deadline:
+                    if portfile.exists():
+                        port_text=portfile.read_text().strip()
+                        if port_text:
+                            break
+                    time.sleep(.01)
+                self.assertTrue(port_text, 'orphan did not publish a TCP listening port')
+                port=int(port_text)
                 self.assertIn(port,life.listeners())
                 self.assertIn(child_pid,life.owned_group_members(proc.pid,'test-orphan-123'))
                 self.assertEqual(life.owned_group_members(proc.pid,'different-job'),[])

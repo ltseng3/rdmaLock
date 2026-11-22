@@ -43,10 +43,20 @@ Workers generate another request only after finishing their previous operation
 (closed loop, one outstanding request per worker process), matching the useful
 shape of DecLock's coroutine microbenchmark. With multiple workers per CN,
 concurrency is the number of active worker processes, not a synthetic queue.
-The transport **from CN to coordinator is TCP**, while replica ordering,
+The default steady-state client-to-leader transport is **two-sided RC RDMA
+SEND/RECV**. TCP is retained **only for QP/configuration bootstrap before GO**,
+and can be selected for a fully identical performance control using
+`"transports": ["tcp"]` in a live suite. Every timed JOIN, PREPARE ticket,
+handoff notification, DONE, GO/STOP, and FINISH message uses the selected
+control transport. CN-to-CN handoff and protected data access remain one-sided
+RDMA. Results include a mandatory `transport` column and never merge TCP
+with RDMA observations. Any live suite without a transport axis defaults to
+`"rdma"`.
+
+The former CN-to-coordinator TCP path was the prototype baseline, while replica ordering,
 protected data operations, and client handoffs use RDMA. TCP admission and the
 leader's release-marker RDMA READ are part of the measured cost. Never describe
-this as a pure one-sided CN admission path or subtract these costs.
+RDMA SEND/RECV admission as one-sided or subtract its cost.
 
 ## Focused transport and preparation diagnostic (before the 320-case suite)
 
@@ -79,6 +89,30 @@ With `--fail-fast`, the first rejected trial stops the matrix, writes
 full intended configuration in `runs.csv`. In a clean run, use
 `summary.csv` and `ablations.csv` to compare matched variants. Do not
 start the 320-trial sweep if any diagnostic case fails.
+
+## RDMA control transport hardware validation
+
+The two-sided control path has a dedicated, bounded QP with 32 preposted
+receives and registered send/receive buffers **per CN worker**. The leader
+has one QP per worker. Send and receive CQs are separate to permit a
+background RECV thread with a synchronous SEND producer. Each received
+frame is copied then its receive buffer is reposted before the next poll.
+Pending recv threads can be cancelled and joined on failure. The TCP
+socket remains only for initialization, startup, and cancellation.
+
+Run `live_transport_smoke.json` before performance comparisons:
+
+```bash
+python3 tools/apt/run_suite.py --suite tools/apt/suites/live_transport_smoke.json --fail-fast
+```
+
+It runs 16 distinct safety-probed cases: tcp and rdma, raw and full, two
+and eight workers (two repetitions). All are the same exclusive hot-lock
+workload with a bounded live queue. Inspect `runs.csv` for per-transport
+latency, throughput, and `violations=0`. If a single RDMA run fails, keep
+its logs and do not interpret TCP results as proof that the RDMA path works.
+The test mock models registered buffer ownership and CQ completions but
+**cannot validate real mlx4 RNR, CQ ordering, MR registration, or RNIC timing**.
 
 ## Named optimization profiles
 

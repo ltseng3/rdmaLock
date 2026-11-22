@@ -24,14 +24,15 @@ struct ibv_ah_attr {uint8_t is_global,sl,src_path_bits,port_num;uint16_t dlid;};
 struct ibv_qp_attr {ibv_qp_state qp_state;int pkey_index;int port_num;int qp_access_flags;
    ibv_mtu path_mtu;uint32_t dest_qp_num,rq_psn, max_dest_rd_atomic,min_rnr_timer;
    ibv_ah_attr ah_attr;uint32_t timeout,retry_cnt,rnr_retry,sq_psn,max_rd_atomic;};
-struct ibv_qp {uint32_t qp_num; ibv_cq* cq;uint32_t remote_qpn;ibv_qp_state state;};
+struct ibv_qp {uint32_t qp_num; ibv_cq* cq;uint32_t remote_qpn;ibv_qp_state state;ibv_cq* recv_cq;};
 struct ibv_sge {uint64_t addr;uint32_t length,lkey;};
-enum ibv_wr_opcode {IBV_WR_RDMA_WRITE=0,IBV_WR_ATOMIC_CMP_AND_SWP=1,IBV_WR_RDMA_READ=2};
+enum ibv_wr_opcode {IBV_WR_RDMA_WRITE=0,IBV_WR_ATOMIC_CMP_AND_SWP=1,IBV_WR_RDMA_READ=2,IBV_WR_SEND=3};
 struct ibv_send_wr {uint64_t wr_id; ibv_send_wr* next;ibv_sge* sg_list;int num_sge;ibv_wr_opcode opcode;unsigned send_flags;
   union { struct {uint64_t remote_addr;uint32_t rkey;} rdma;
           struct {uint64_t remote_addr;uint64_t compare_add,swap;uint32_t rkey;} atomic;} wr;
 };
-struct ibv_wc {int status;};
+struct ibv_recv_wr {uint64_t wr_id;ibv_recv_wr* next;ibv_sge* sg_list;int num_sge;};
+struct ibv_wc {int status;uint64_t wr_id;uint32_t byte_len;};
 #define IBV_WC_SUCCESS 0
 #define IBV_ACCESS_LOCAL_WRITE 1
 #define IBV_ACCESS_REMOTE_WRITE 2
@@ -69,6 +70,7 @@ int ibv_modify_qp(ibv_qp*,ibv_qp_attr*,int);
 ibv_mr* ibv_reg_mr(ibv_pd*,void*,size_t,int);
 int ibv_dereg_mr(ibv_mr*);
 int ibv_post_send(ibv_qp*,ibv_send_wr*,ibv_send_wr**);
+int ibv_post_recv(ibv_qp*,ibv_recv_wr*,ibv_recv_wr**);
 int ibv_poll_cq(ibv_cq*,int,ibv_wc*);
 const char* ibv_wc_status_str(int);
 #ifdef __cplusplus

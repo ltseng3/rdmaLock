@@ -42,7 +42,7 @@ COLUMNS = ['case', 'scenario', 'trial', 'kind', 'measurement_scope', 'comparable
            'work_ns', 'completed', 'verified_markers', 'violations',
            'ordering_seconds', 'handoff_seconds', 'goodput_ops_per_sec',
            'including_ordering_ops_per_sec', 'ordered_entries_per_sec', 'status',
-           'profile', 'lock_count', 'distribution', 'warmup_ms', 'measure_ms', 'seed',
+           'profile', 'transport', 'lock_count', 'distribution', 'warmup_ms', 'measure_ms', 'seed',
            'paxos_slots', 'max_ops', 'join_aggregate', 'phase2_window', 'prepare_range',
            'lookahead', 'replenish_threshold', 'batch_wait_us', 'measured', 'join_batches',
            'actual_join_batch_mean', 'prepare_records', 'latency_p50_ns', 'latency_p95_ns',
@@ -69,6 +69,9 @@ def expand_live(spec, topology, suite_seed, start_id):
         raise ValueError('LIVE profiles must be a nonempty array')
     for p in profiles:
         profile(p)
+    transports=spec.get('transports',['rdma'])
+    if not isinstance(transports,list) or not transports or any(t not in ('rdma','tcp') for t in transports):
+        raise ValueError('LIVE transports must contain rdma or tcp')
     cn_values = spec.get('cn_counts', [len(topology['clients'])])
     if cn_values == 'powers_of_two':
         cn_values = [2**i for i in range(1, 8) if 2**i <= len(topology['clients'])]
@@ -90,16 +93,16 @@ def expand_live(spec, topology, suite_seed, start_id):
     if max_ops > slots - slots//64:
         raise ValueError('LIVE max_ops must leave safety headroom in consensus log')
     cases=[]
-    combinations = itertools.product(profiles, cn_counts, workers, locks, distributions, probes, work)
-    for pname, cn, wpc, lock_count, distribution, probe, ns in combinations:
+    combinations = itertools.product(profiles, transports, cn_counts, workers, locks, distributions, probes, work)
+    for pname, transport, cn, wpc, lock_count, distribution, probe, ns in combinations:
         if cn*wpc>64 or any(wpc>n.get('cores', 8) for n in topology['clients'][:cn]):
             raise ValueError('LIVE workers exceed core budget or 64 worker processes')
         for trial in range(1, repetitions+1):
-            case=dict(name=name,kind='live_e2e',trial=trial,profile=pname,
+            case=dict(name=name,kind='live_e2e',trial=trial,profile=pname,transport=transport,
                 cn_count=cn,workers_per_cn=wpc,locks=lock_count,distribution=distribution,
                 probe=probe,work_ns=ns,seed=seed,warmup_ms=warmup,measure_ms=measurement,
                 paxos_slots=slots,max_ops=max_ops,positions=topology['benchmark']['positions'],batch=1)
-            case['id']=f'{start_id+len(cases):04d}-{name}-{pname}-t{trial}'
+            case['id']=f'{start_id+len(cases):04d}-{name}-{pname}-{transport}-t{trial}'
             cases.append(case)
     return cases
 
@@ -181,7 +184,7 @@ def case_topology(original, case, ballot):
                             work_ns=case['work_ns'])
     if case['kind'] == 'live_e2e':
         p = profile(case['profile'])
-        doc['benchmark'].update(mode='live', **p, paxos_slots=case['paxos_slots'],
+        doc['benchmark'].update(mode='live', cn_transport=case['transport'], **p, paxos_slots=case['paxos_slots'],
             max_ops=case['max_ops'], warmup_ms=case['warmup_ms'],
             measure_ms=case['measure_ms'], locks=case['locks'],
             zipf=int(case['distribution']=='zipf_0.99'), seed=case['seed'])
@@ -199,7 +202,7 @@ def extract_live(text):
             'prepare_range','lookahead','replenish_threshold','batch_wait_us',
             'actual_join_batch_mean','prepare_records','goodput_ops_per_sec',
             'latency_p50_ns','latency_p95_ns','latency_p99_ns',
-            'admission_p50_ns','admission_p99_ns','handoff_wait_p99_ns')
+            'admission_p50_ns','admission_p99_ns','handoff_wait_p99_ns','transport')
     if any(key not in result for key in needed):
         raise ValueError('incomplete LIVE_E2E output')
     if result['status']!='PASS' or result['scope']!='live_steady_state':
@@ -374,7 +377,8 @@ def benchmark(ex, case, topology, commit, session, run_root, ballot, timeout):
             if (int(summary['workers']) != sum(x['workers'] for x in doc['clients']) or
                 int(summary['locks']) != case['locks'] or
                 int(summary['measure_ms']) != case['measure_ms'] or
-                int(summary['warmup_ms']) != case['warmup_ms']):
+                int(summary['warmup_ms']) != case['warmup_ms'] or
+                summary['transport'] != case['transport']):
                 raise ValueError('LIVE result does not match request')
             for k in ('join_aggregate','phase2_window','prepare_range','lookahead','replenish_threshold','batch_wait_us'):
                 if int(summary[k]) != doc['benchmark'][k]:
@@ -390,7 +394,7 @@ def benchmark(ex, case, topology, commit, session, run_root, ballot, timeout):
                    cn_nodes=case['cn_count'],worker_processes=case['cn_count']*case['workers_per_cn'],
                    positions=case['positions'],batch=case['batch'],probe=case['probe'],work_ns=case['work_ns'],status='PASS')
         if case['kind'] == 'live_e2e':
-            row.update(profile=case['profile'],lock_count=case['locks'],distribution=case['distribution'],
+            row.update(profile=case['profile'],transport=case['transport'],lock_count=case['locks'],distribution=case['distribution'],
                 warmup_ms=case['warmup_ms'],measure_ms=case['measure_ms'],seed=case['seed'],
                 paxos_slots=case['paxos_slots'],max_ops=case['max_ops'])
             for k in ('join_aggregate','phase2_window','prepare_range','lookahead','replenish_threshold',
@@ -441,14 +445,14 @@ def summarize(rows, path):
         if row['status'] != 'PASS':
             continue
         field = 'ordered_entries_per_sec' if row['kind']=='ordering_micro' else 'goodput_ops_per_sec'
-        key = (row['kind'], row.get('scenario',''), row.get('profile',''), row['cn_nodes'],
+        key = (row['kind'], row.get('scenario',''), row.get('profile',''), row.get('transport',''), row['cn_nodes'],
                row['worker_processes'], row['positions'], row['batch'], row['probe'], row['work_ns'],
                row.get('lock_count',''), row.get('distribution',''), row.get('warmup_ms',''),
                row.get('measure_ms',''), row.get('seed',''))
         groups.setdefault(key, []).append(float(row[field]))
     with path.open('w', newline='') as fp:
         w=csv.writer(fp)
-        w.writerow(['kind','scenario','profile','cn_nodes','workers','positions','batch','probe',
+        w.writerow(['kind','scenario','profile','transport','cn_nodes','workers','positions','batch','probe',
                     'work_ns','locks','distribution','warmup_ms','measure_ms','seed',
                     'trials','median_ops_per_sec','min_ops_per_sec','max_ops_per_sec','comparable_to_declock'])
         for key,values in sorted(groups.items(),key=lambda p:str(p[0])):
@@ -466,13 +470,13 @@ def write_ablations(rows, path):
     for row in rows:
         if row['kind']!='live_e2e':
             continue
-        key=(row.get('scenario'),row.get('cn_nodes'),row.get('worker_processes'),
+        key=(row.get('scenario'),row.get('transport'),row.get('cn_nodes'),row.get('worker_processes'),
              row.get('lock_count'),row.get('distribution'),row.get('work_ns'),
              row.get('probe'),row.get('warmup_ms'),row.get('measure_ms'),row.get('seed'))
         groups.setdefault(key,{})[(row.get('profile'),row['trial'])]=row
     with path.open('w',newline='') as f:
         writer=csv.writer(f)
-        writer.writerow(['scenario','cn_nodes','workers','locks','distribution','work_ns','probe',
+        writer.writerow(['scenario','transport','cn_nodes','workers','locks','distribution','work_ns','probe',
             'warmup_ms','measure_ms','seed','effect','control','treatment',
             'matched_trials','control_median_ops','treatment_median_ops',
             'median_speedup','median_gain_pct','bootstrap95_low','bootstrap95_high','status'])
@@ -517,7 +521,7 @@ def failure_row(case, commit, exc):
                probe=case['probe'],work_ns=case['work_ns'],status='FAIL',
                error=str(exc).replace('\n',' | ')[:2000])
     if case['kind']=='live_e2e':
-        row.update(profile=case['profile'],lock_count=case['locks'],
+        row.update(profile=case['profile'],transport=case['transport'],lock_count=case['locks'],
                    distribution=case['distribution'],warmup_ms=case['warmup_ms'],
                    measure_ms=case['measure_ms'],seed=case['seed'],
                    paxos_slots=case['paxos_slots'],max_ops=case['max_ops'],
@@ -549,7 +553,7 @@ def main():
     for c in cases:
         print(f'  {c["id"]} {c["kind"]} positions={c["positions"]} batch={c["batch"]} '
               f'CN={c["cn_count"]} workers/CN={c["workers_per_cn"]} probe={c["probe"]}'
-              f' profile={c.get("profile", "-")} locks={c.get("locks", "-")}',flush=True)
+              f' profile={c.get("profile", "-")} transport={c.get("transport", "-")} locks={c.get("locks", "-")}',flush=True)
     print('Measurement families: live CN-admitted MuCQL, prepared-handoff, or ordering-only. '
           'DecLock adapter not yet available; do not present these as head-to-head curves.',flush=True)
     if args.dry_run:

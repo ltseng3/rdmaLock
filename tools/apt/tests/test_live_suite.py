@@ -28,7 +28,7 @@ LIVE_LINE=('LIVE_E2E status=PASS scope=live_steady_state workers=2 locks=1 zipf=
            'join_batches=412 actual_join_batch_mean=1 prepare_records=412 '
            'latency_p50_ns=1000 latency_p95_ns=5000 latency_p99_ns=9000 '
            'admission_p50_ns=400 admission_p99_ns=1000 handoff_wait_p99_ns=2000 '
-           'goodput_ops_per_sec=614 probe=1 work_ns=0')
+           'goodput_ops_per_sec=614 transport=rdma probe=1 work_ns=0')
 
 
 class LiveSuiteTests(unittest.TestCase):
@@ -62,6 +62,7 @@ class LiveSuiteTests(unittest.TestCase):
                          {('raw',1),('raw',2),('full',1),('full',2)})
         cfg=runner.case_topology(TOPO,cases[0],7777)
         self.assertEqual(cfg['benchmark']['mode'],'live')
+        self.assertEqual(cfg['benchmark']['cn_transport'],'rdma')
         self.assertEqual(cfg['benchmark']['ballot'],7777)
         self.assertEqual(cfg['benchmark']['measure_ms'],500)
         self.assertEqual(cfg['clients'][0]['workers'],1)
@@ -130,6 +131,36 @@ class LiveSuiteTests(unittest.TestCase):
         self.assertEqual(row['join_aggregate'],1)
         self.assertIn('RDMA registration failed',row['error'])
         self.assertIn('error',runner.COLUMNS)
+
+    def test_transport_matrix_is_independent_and_reproducible(self):
+        spec=json.loads((HERE/'suites/live_transport_smoke.json').read_text())
+        cases=runner.expand_suite(spec,TOPO)
+        self.assertEqual(len(cases),16)
+        self.assertEqual({(c['transport'],c['profile'],c['workers_per_cn']) for c in cases},
+                         {(t,p,w) for t in ('rdma','tcp') for p in ('raw','full')
+                          for w in (1,4)})
+        self.assertEqual(len({c['id'] for c in cases}),16)
+        for c in cases:
+            self.assertEqual(runner.case_topology(TOPO,c,7777)['benchmark']['cn_transport'],c['transport'])
+        with self.assertRaisesRegex(ValueError,'transports'):
+            runner.expand_suite({'tests':[dict(BASE,transports=['udp'])]},TOPO)
+
+    def test_cross_transport_ablations_not_merged(self):
+        rows=[]
+        for transport, raw, full in (('tcp',100.,200.),('rdma',300.,600.)):
+            for pn,rate in (('raw',raw),('full',full)):
+                rows.append(dict(kind='live_e2e',scenario='transport-isolation',transport=transport,
+                    cn_nodes=2,worker_processes=2,lock_count=1,distribution='uniform',
+                    work_ns=0,probe=0,warmup_ms=100,measure_ms=500,seed=2026,
+                    profile=pn,trial=1,status='PASS',goodput_ops_per_sec=str(rate)))
+        with tempfile.TemporaryDirectory() as tmp:
+            out=Path(tmp)/'ablation.csv'
+            runner.write_ablations(rows,out)
+            with out.open() as f:
+                a=[z for z in csv.DictReader(f) if z['effect']=='Combined optimization vs raw']
+            self.assertEqual(len(a),2)
+            self.assertEqual({z['transport'] for z in a},{'tcp','rdma'})
+            self.assertEqual({z['median_speedup'] for z in a},{'2.0000'})
 
     def test_run_matrix_bounds(self):
         spec=json.loads((HERE/'suites/live_ablations.json').read_text())

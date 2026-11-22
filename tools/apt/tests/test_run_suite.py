@@ -124,6 +124,10 @@ class SuiteTests(unittest.TestCase):
     def test_lifecycle_agent_has_a_job_tag(self):
         self.assertEqual(__import__('process_lifecycle').JOB_ENV,'MUCQL_AUTOMATION_JOB')
 
+    def test_transport_isolation_env_set_before_live_launch(self):
+        source=(Path(__file__).resolve().parents[1]/'isolated_cluster.py').read_text()
+        self.assertIn('env["MUCQL_CN_TRANSPORT"] =',source)
+
     def test_controller_ssh_exec_is_noninteractive(self):
         ex=auto.Executor(username='tsengle',checkout=Path('/tmp'),local_ips=set())
         self.assertEqual(ex.is_local({'ip':'10.10.1.1'}),False)

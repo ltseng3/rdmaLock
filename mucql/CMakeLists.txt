@@ -42,7 +42,7 @@ target_link_libraries(mucql_paxos_demo PRIVATE mucql_core Threads::Threads)
 find_path(IBVERBS_INCLUDE_DIR infiniband/verbs.h)
 find_library(IBVERBS_LIB ibverbs)
 if(IBVERBS_INCLUDE_DIR AND IBVERBS_LIB)
-  add_library(mucql_verbs STATIC src/verbs_release.cpp src/verbs_paxos.cpp)
+  add_library(mucql_verbs STATIC src/verbs_release.cpp src/verbs_paxos.cpp src/live_control.cpp)
   target_include_directories(mucql_verbs PUBLIC include PRIVATE ${IBVERBS_INCLUDE_DIR})
   target_link_libraries(mucql_verbs PUBLIC mucql_core ${IBVERBS_LIB} Threads::Threads)
   target_compile_options(mucql_verbs PRIVATE -Wall -Wextra -Wpedantic)
@@ -64,7 +64,7 @@ endif()
 # Tests only state/serialization/control bootstrap; never validates real NIC behavior.
 option(MUCQL_MOCK_VERBS_TEST "Build mock RDMA transport test" ON)
 if(MUCQL_MOCK_VERBS_TEST)
-  add_library(mucql_mock_verbs STATIC src/verbs_release.cpp tests/mock_verbs.cpp)
+  add_library(mucql_mock_verbs STATIC src/verbs_release.cpp src/live_control.cpp tests/mock_verbs.cpp)
   target_include_directories(mucql_mock_verbs PUBLIC include PRIVATE tests/stub)
   target_link_libraries(mucql_mock_verbs PUBLIC Threads::Threads)
   target_compile_options(mucql_mock_verbs PRIVATE -Wall -Wextra -Wpedantic -Werror)
@@ -110,3 +110,13 @@ if(MUCQL_MOCK_VERBS_TEST)
   target_link_libraries(mucql_paxos_rdma_mock_test PRIVATE mucql_mock_verbs mucql_core)
   add_test(NAME mucql_rdma_quorum_mock COMMAND mucql_paxos_rdma_mock_test)
 endif()
+
+# Both software-MR variants execute the same live control channel.
+add_test(NAME mucql_live_rdma_hot_mock COMMAND mucql_live_mock_test 4 1 8 8 8 16 0 1)
+add_test(NAME mucql_live_rdma_16clients_mock COMMAND mucql_live_mock_test 16 1 16 16 16 64 0 1)
+set_tests_properties(mucql_live_rdma_hot_mock mucql_live_rdma_16clients_mock
+  PROPERTIES ENVIRONMENT "MUCQL_CN_TRANSPORT=rdma" TIMEOUT 45 RUN_SERIAL TRUE)
+set_tests_properties(mucql_live_hot_raw mucql_live_hot_optimized
+  mucql_live_multilock mucql_live_uninstrumented
+  mucql_live_16clients_hot_mock mucql_live_16clients_zipf_mock
+  PROPERTIES ENVIRONMENT "MUCQL_CN_TRANSPORT=tcp")

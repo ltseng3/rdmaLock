@@ -1,0 +1,42 @@
+{
+  "seed": 2026,
+  "shuffle": true,
+  "tests": [
+    {
+      "name": "cn-control-transport-smoke",
+      "kind": "live_e2e",
+      "profiles": [
+        "raw",
+        "full"
+      ],
+      "transports": [
+        "rdma",
+        "tcp"
+      ],
+      "cn_counts": [
+        2
+      ],
+      "workers_per_cn": [
+        1,
+        4
+      ],
+      "locks": [
+        1
+      ],
+      "distributions": [
+        "uniform"
+      ],
+      "probes": [
+        1
+      ],
+      "work_ns": [
+        0
+      ],
+      "warmup_ms": 100,
+      "measure_ms": 500,
+      "paxos_slots": 16384,
+      "max_ops": 6500,
+      "repetitions": 2
+    }
+  ]
+}

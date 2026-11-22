@@ -67,6 +67,8 @@ def validate(doc):
     if mode not in ("prepared", "live"):
         raise ValueError("benchmark.mode must be prepared or live")
     if mode == "live":
+        if bench.get("cn_transport","rdma") not in ("rdma","tcp"):
+            raise ValueError("live cn_transport must be rdma or tcp")
         for name, lo, hi in (("max_ops", total, 1_000_000), ("paxos_slots", 4096, 1_000_000),
                              ("locks", 1, 4096), ("join_aggregate", 1, 32),
                              ("phase2_window", 1, 32), ("prepare_range", 1, 128),
@@ -200,6 +202,7 @@ def main():
     env = dict(os.environ, MUCQL_IB_PORT=str(doc["ib_port"]))
     if doc["benchmark"].get("mode") == "live":
         env["MUCQL_PAXOS_SLOTS"] = str(doc["benchmark"]["paxos_slots"])
+        env["MUCQL_CN_TRANSPORT"] = doc["benchmark"].get("cn_transport","rdma")
     for line in cmds:
         print("MUCQL_IB_PORT=" + str(doc["ib_port"]) + " " + shlex.join(line), flush=True)
     if args.action == "print":

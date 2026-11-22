@@ -5,6 +5,7 @@
 #include "mucql/paxos.hpp"
 #include "mucql/verbs_paxos.hpp"
 #include "mucql/verbs_release.hpp"
+#include "mucql/live_control.hpp"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -53,9 +54,22 @@ struct Options {uint64_t ballot{},max_ops{},workers{},lock_count{1},join_aggrega
   prepare_range{1},lookahead{2},replenish_threshold{1},batch_wait_us{0},probe{0},work_ns{0},warmup_ms{200},measure_ms{500},
   seed{2026},zipf{0},paxos_slots{4096};};
 struct Config {uint64_t magic,workers,self,lock_count,max_ops,paxos_slots,probe,work_ns,
-  warmup_ms,measure_ms,seed,zipf;uint64_t data_port;char data_host[64];};
+  warmup_ms,measure_ms,seed,zipf,transport;uint64_t data_port;char data_host[64];};
 struct EndlessClock:Clock {Bounds now() const override{return {0,0};}};
 struct Event {size_t worker;Message m;};
+bool rdma_admission(){
+  const char* v=std::getenv("MUCQL_CN_TRANSPORT");
+  if(!v||std::strcmp(v,"rdma")==0)return true;
+  if(std::strcmp(v,"tcp")==0)return false;
+  throw std::runtime_error("MUCQL_CN_TRANSPORT must be rdma or tcp");
+}
+uint8_t control_port(){
+  const char* p=std::getenv("MUCQL_IB_PORT");
+  if(!p)return 1;
+  auto n=std::stoul(p);
+  if(n<1||n>2)throw std::runtime_error("MUCQL_IB_PORT must be 1 or 2");
+  return uint8_t(n);
+}
 [[noreturn]] void fail(const std::string& s){throw std::runtime_error("mucql_live: "+s);}
 uint64_t number(const char* s,uint64_t lo,uint64_t hi,const std::string& name){
   try{size_t end=0;std::string a=s;auto n=std::stoull(a,&end);if(end!=a.size()||n<lo||n>hi)fail("bad "+name);return n;}
@@ -159,9 +173,10 @@ int coordinator(int argc,char**argv){
   // MUCQL_PAXOS_SLOTS is shared with acceptors; this prevents CLI sprawl.
   if(const char* s=getenv("MUCQL_PAXOS_SLOTS"))o.paxos_slots=number(s,4096,kMaxSlots,"paxos_slots");
   validate(o);
+  const bool control_rdma=rdma_admission();
   int listenfd=listen_tcp(port);
   std::cout<<"LIVE coordinator listening tcp="<<port<<" workers="<<o.workers
-           <<" locks="<<o.lock_count<<" max_ops="<<o.max_ops<<std::endl;
+           <<" locks="<<o.lock_count<<" max_ops="<<o.max_ops<<" transport="<<(control_rdma?"rdma":"tcp")<<std::endl;
   std::vector<int> sockets(o.workers,-1);std::vector<Peer> peers(o.workers);
   for(size_t n=0;n<o.workers;n++){
     int fd=accept_tcp(listenfd);
@@ -183,22 +198,26 @@ int coordinator(int argc,char**argv){
     Config c{};c.magic=kMagic;c.workers=o.workers;c.self=w;c.lock_count=o.lock_count;
     c.max_ops=o.max_ops;c.paxos_slots=o.paxos_slots;c.probe=o.probe;c.work_ns=o.work_ns;
     c.warmup_ms=o.warmup_ms;c.measure_ms=o.measure_ms;c.seed=o.seed;c.zipf=o.zipf;
+    c.transport=control_rdma?1:0;
     c.data_port=data_port;host_to(c.data_host,data_host);
     send_exact(sockets[w],&c,sizeof(c));send_exact(sockets[w],peers.data(),sizeof(Peer)*peers.size());
   }
+  std::vector<std::unique_ptr<LiveControlChannel>> channels(o.workers);
+  for(size_t w=0;w<o.workers;w++)
+    channels[w]=std::make_unique<LiveControlChannel>(sockets[w],device,control_port(),control_rdma,sizeof(Message));
   for(auto fd:sockets){char ready=0;recv_exact(fd,&ready,1);if(ready!='R')fail("worker not RDMA-ready");}
   std::mutex mu;std::condition_variable cv;std::deque<Event> received;
   std::string recv_error;bool closed=false;
   std::vector<std::thread> readers;
   for(size_t w=0;w<o.workers;w++)readers.emplace_back([&,w]{
-    try{for(;;){Message m{};recv_exact(sockets[w],&m,sizeof(m));if(m.magic!=kMagic)fail("bad worker message");
+    try{for(;;){Message m{};channels[w]->recv(&m,sizeof(m));if(m.magic!=kMagic)fail("bad worker message");
       {std::lock_guard<std::mutex> lock(mu);received.push_back({w,m});}cv.notify_one();
       if(m.type==Quiescent)break;}}
     catch(const std::exception& e){std::lock_guard<std::mutex> lock(mu);
       if(!closed && recv_error.empty())recv_error="worker "+std::to_string(w)+": "+e.what();
       cv.notify_one();}
   });
-  auto send_to=[&](size_t w,Message m){send_exact(sockets[w],&m,sizeof(m));};
+  auto send_to=[&](size_t w,Message m){channels[w]->send(&m,sizeof(m));};
   auto start=ClockType::now();
   for(size_t w=0;w<o.workers;w++)send_to(w,message(Go));
   auto end=start+std::chrono::milliseconds(o.warmup_ms+o.measure_ms);
@@ -339,10 +358,12 @@ int coordinator(int argc,char**argv){
       <<" admission_p99_ns="<<percentile(admission,0.99)
       <<" handoff_wait_p99_ns="<<percentile(waits,0.99)
       <<" goodput_ops_per_sec="<<1000.0*measured/o.measure_ms
+      <<" transport="<<(control_rdma?"rdma":"tcp")
       <<" probe="<<o.probe<<" work_ns="<<o.work_ns<<std::endl;
     for(size_t w=0;w<o.workers;w++)send_to(w,message(Finish));
   }catch(...){
     {std::lock_guard<std::mutex> lock(mu);closed=true;}
+    for(auto& ch:channels)if(ch)ch->stop();
     for(auto fd:sockets)shutdown(fd,SHUT_RDWR);
     for(auto& t:readers)if(t.joinable())t.join();
     for(auto fd:sockets)close(fd);
@@ -350,6 +371,7 @@ int coordinator(int argc,char**argv){
     throw;
   }
   {std::lock_guard<std::mutex> lock(mu);closed=true;}
+  for(auto& ch:channels)if(ch)ch->stop();
   for(auto fd:sockets)shutdown(fd,SHUT_RDWR);
   for(auto& t:readers)if(t.joinable())t.join();
   for(auto fd:sockets)close(fd);
@@ -384,9 +406,12 @@ int worker(int argc,char**argv){
   Hello h{};h.magic=kMagic;h.index=id;h.port=local_port;host_to(h.ip,self_ip);
   send_exact(fd,&h,sizeof(h));
   Config cfg{};recv_exact(fd,&cfg,sizeof(cfg));
+  const bool control_rdma=rdma_admission();
   if(cfg.magic!=kMagic||cfg.self!=id||cfg.workers>kMaxWorkers||cfg.workers<2||
-     cfg.paxos_slots!=slots||cfg.lock_count<1||cfg.lock_count>4096)fail("bad LIVE config/slot mismatch");
+     cfg.paxos_slots!=slots||cfg.lock_count<1||cfg.lock_count>4096||
+     cfg.transport!=(control_rdma?1ULL:0ULL))fail("bad LIVE config/slot/transport mismatch");
   std::vector<Peer> peers(cfg.workers);recv_exact(fd,peers.data(),sizeof(Peer)*peers.size());
+  LiveControlChannel channel(fd,device,control_port(),control_rdma,sizeof(Message));
   Options o{};o.paxos_slots=slots;o.lock_count=cfg.lock_count;o.work_ns=cfg.work_ns;
   o.probe=cfg.probe;o.warmup_ms=cfg.warmup_ms;o.measure_ms=cfg.measure_ms;
   o.seed=cfg.seed;o.zipf=cfg.zipf;o.max_ops=cfg.max_ops;
@@ -398,7 +423,7 @@ int worker(int argc,char**argv){
   std::set<GrantId> retired;
   std::string stream_error;bool go=false,stop=false,finished=false;
   std::thread reader([&]{try{
-    for(;;){Message m{};recv_exact(fd,&m,sizeof(m));if(m.magic!=kMagic)fail("bad coordinator message");
+    for(;;){Message m{};channel.recv(&m,sizeof(m));if(m.magic!=kMagic)fail("bad coordinator message");
       {std::lock_guard<std::mutex> lock(mu);
         if(m.type==TicketReady){auto t=unpack(m.ticket);if(t.client!=id+1||t.grant_id>=slots)fail("foreign/invalid ticket");assigned.push_back(t);}
         else if(m.type==HandoffReady){auto t=unpack(m.ticket);if(t.grant_id>=slots||!t.predecessor_id)fail("invalid handoff");successors.push_back(t);}
@@ -430,6 +455,7 @@ int worker(int argc,char**argv){
   }catch(const std::exception& e){std::lock_guard<std::mutex> lock(mu);stream_error=e.what();cv.notify_all();}});
   {char ready='R';send_exact(fd,&ready,1);}
   auto finish_threads=[&]{
+    channel.stop();
     shutdown(fd,SHUT_RDWR);
     if(reader.joinable())reader.join();
     {std::lock_guard<std::mutex> lock(mu);finished=true;}cv.notify_all();
@@ -450,7 +476,7 @@ int worker(int argc,char**argv){
         if(!stream_error.empty())fail(stream_error);}
       auto send_at=ClockType::now();
       Ticket asked{};asked.client=id+1;asked.lock=locks.next();asked.request=++request;
-      {auto join_msg=message(Join,asked);send_exact(fd,&join_msg,sizeof(join_msg));}
+      {auto join_msg=message(Join,asked);channel.send(&join_msg,sizeof(join_msg));}
       Ticket t;
       {std::unique_lock<std::mutex> lock(mu);
         cv.wait(lock,[&]{return !assigned.empty()||!stream_error.empty();});
@@ -491,10 +517,10 @@ int worker(int argc,char**argv){
       done.latency_ns=std::chrono::duration_cast<ns>(completed_at-send_at).count();
       done.admit_ns=std::chrono::duration_cast<ns>(admit_at-send_at).count();
       done.wait_ns=handoff_wait_ns;
-      send_exact(fd,&done,sizeof(done));
+      channel.send(&done,sizeof(done));
       completed++;
     }
-    {auto qmsg=message(Quiescent);send_exact(fd,&qmsg,sizeof(qmsg));}
+    {auto qmsg=message(Quiescent);channel.send(&qmsg,sizeof(qmsg));}
     {std::unique_lock<std::mutex> lock(mu);
       cv.wait(lock,[&]{return finished||!stream_error.empty();});
       if(!stream_error.empty())fail(stream_error);

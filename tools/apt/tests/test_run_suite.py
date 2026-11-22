@@ -119,7 +119,7 @@ class SuiteTests(unittest.TestCase):
         self.assertEqual(len(cases),24)
         self.assertEqual({(c['profile'],c['trial']) for c in cases},
                          {(p,i) for p in ('raw','full') for i in range(1,13)})
-        self.assertTrue(all(c['paxos_slots']==16384 for c in cases))
+        self.assertTrue(all(c['paxos_slots']==131072 and c['max_ops']==90000 for c in cases))
 
     def test_lifecycle_agent_has_a_job_tag(self):
         self.assertEqual(__import__('process_lifecycle').JOB_ENV,'MUCQL_AUTOMATION_JOB')

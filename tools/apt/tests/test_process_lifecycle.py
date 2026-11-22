@@ -56,9 +56,15 @@ class LifecycleTests(unittest.TestCase):
                 proc=subprocess.Popen([sys.executable,'-c',script],env=env,start_new_session=True)
                 try:
                     deadline=time.monotonic()+2
-                    while not f.exists() and time.monotonic()<deadline:
+                    port_text=''
+                    while time.monotonic()<deadline:
+                        if f.exists():
+                            port_text=f.read_text().strip()
+                            if port_text:
+                                break
                         time.sleep(.01)
-                    port=int(f.read_text())
+                    self.assertTrue(port_text, 'child did not publish a TCP listening port')
+                    port=int(port_text)
                     self.assertIn(port,life.listeners())
                     self.assertTrue(life.owned_group_members(proc.pid,tag))
                     life.stop_owned_group(proc.pid,tag,grace=.5,kill_grace=.5)

@@ -149,3 +149,74 @@ class LiveSuiteTests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+class LiveControllerLifecycleTests(unittest.TestCase):
+    """An in-memory remote-agent stub exercises the actual controller sequence.
+
+    No local NIC or SSH credentials are needed, so these are contract tests,
+    not substitutes for real distributed hardware validation.
+    """
+    class FakeRemote:
+        def __init__(self, primary):
+            self.primary=primary
+            self.events=[]
+            self.synced={}
+            self.started=[]
+            self.stopped=[]
+
+        def sync_config(self, node, cfg, json_text):
+            self.events.append(('config',node['id']))
+            self.synced[node['id']]=json.loads(json_text)
+
+        def agent(self,node,*,cfg,job,role,action,timeout=20):
+            self.events.append((action,role))
+            if action=='start':
+                self.started.append((node['id'],role,job))
+                return {'started':True}
+            if action=='status':
+                return {'ready':True,'alive':True,'finished':True,
+                        'returncode':0,'log_tail':''}
+            if action=='probe':
+                assert node['id'].startswith('cn')
+                return {'probe':'PASS'}
+            if action=='logs':
+                return {'files':{'stdout.log': self.primary if role=='coordinator' else 'OK\n'}}
+            if action=='stop':
+                self.stopped.append((node['id'],role,job))
+                return {'stopped':True}
+            raise AssertionError(action)
+
+    def _case(self):
+        return runner.expand_suite({'tests':[dict(BASE, profiles=['raw'],
+                        probes=[1], repetitions=1)]},TOPO)[0]
+
+    def test_full_lifecycle_and_no_cn_on_mn(self):
+        fake=self.FakeRemote(LIVE_LINE)
+        case=self._case()
+        with tempfile.TemporaryDirectory() as tmp:
+            row=runner.benchmark(fake,case,TOPO,'c'*40,'run-a',Path(tmp),7777,30)
+            self.assertEqual(row['kind'],'live_e2e')
+            self.assertEqual(row['profile'],'raw')
+            self.assertEqual(row['status'],'PASS')
+            self.assertEqual(row['comparable_to_declock'],'NO')
+            self.assertEqual(len(fake.synced),6)
+            self.assertEqual(len(fake.started),7)
+            self.assertEqual(set(x[1] for x in fake.started),
+                  {'mn1','mn2','mn3','mn4','coordinator','cn1','cn2'})
+            self.assertEqual(len(fake.stopped),len(fake.started))
+            self.assertEqual(fake.events.index(('probe','cn1')) <
+                             fake.events.index(('start','coordinator')),True)
+            for node,role,_ in fake.started:
+                if role.startswith('cn'):
+                    self.assertEqual(node,role)
+            self.assertTrue((Path(tmp)/case['id']/'coordinator'/'stdout.log').exists())
+
+    def test_invalid_result_still_cleans_every_job(self):
+        bad=LIVE_LINE.replace('verified_markers=412','verified_markers=410')
+        fake=self.FakeRemote(bad)
+        case=self._case()
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError,'marker'):
+                runner.benchmark(fake,case,TOPO,'c'*40,'run-b',Path(tmp),7777,30)
+            self.assertEqual(len(fake.started),7)
+            self.assertEqual(len(fake.stopped),7)

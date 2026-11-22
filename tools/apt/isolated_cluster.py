@@ -63,6 +63,24 @@ def validate(doc):
     if total > 64:
         raise ValueError("this executable currently supports at most 64 worker processes")
     bench = doc["benchmark"]
+    mode = bench.get("mode", "prepared")
+    if mode not in ("prepared", "live"):
+        raise ValueError("benchmark.mode must be prepared or live")
+    if mode == "live":
+        for name, lo, hi in (("max_ops", total, 1_000_000), ("paxos_slots", 4096, 1_000_000),
+                             ("locks", 1, 4096), ("join_aggregate", 1, 32),
+                             ("phase2_window", 1, 32), ("prepare_range", 1, 128),
+                             ("lookahead", 2, 4096), ("replenish_threshold", 1, 4096),
+                             ("batch_wait_us", 0, 5000), ("warmup_ms", 0, 60000),
+                             ("measure_ms", 50, 120000), ("seed", 1, 2**63-1),
+                             ("zipf", 0, 1)):
+            v = bench.get(name)
+            if type(v) is not int or not lo <= v <= hi:
+                raise ValueError(f"live benchmark.{name} must be an integer {lo}..{hi}")
+        if bench["prepare_range"] > bench["lookahead"] or bench["replenish_threshold"] > bench["lookahead"]:
+            raise ValueError("invalid live PREPARE range/trigger vs window")
+        if bench["max_ops"] > bench["paxos_slots"] - bench["paxos_slots"] // 64:
+            raise ValueError("live operation budget is too close to journal capacity")
     for key, lo, hi in [("positions", total, 3000), ("ballot", 1, 2**63-1),
                         ("order_batch", 1, 32), ("work_ns", 0, 1000000000),
                         ("probe", 0, 1)]:
@@ -116,6 +134,15 @@ def commands(doc, role, *, ballot=None, positions=None, batch=None, probe=None, 
     binary = lambda s: str(Path(base[0]) / s)
     dev = doc["device"]
     ports = doc.get("ports", {"ordering":29660,"data":29670,"coordinator":29700,"worker_base":29711})
+    live = b.get("mode") == "live"
+    if role == "coordinator" and live:
+        return [[binary("mucql_lock_live"), "coordinator", str(ports["coordinator"]),
+                 str(b["ballot"]), str(b["max_ops"]), str(total), dat["ip"] + ":" + str(ports["data"]),
+                 *(n["ip"] + ":" + str(ports["ordering"]) for n in r), dev,
+                 str(b["join_aggregate"]), str(b["phase2_window"]), str(b["prepare_range"]),
+                 str(b["lookahead"]), str(b["replenish_threshold"]), str(b["batch_wait_us"]),
+                 str(b["probe"]), str(b["work_ns"]), str(b["warmup_ms"]), str(b["measure_ms"]),
+                 str(b["locks"]), str(b["zipf"]), str(b["seed"])]]
     if role == "coordinator":
         return [[binary("mucql_lock_e2e"), "coordinator", str(ports["coordinator"]), str(b["ballot"]),
                  str(b["positions"]), str(total), dat["ip"] + ":" + str(ports["data"]),
@@ -129,9 +156,10 @@ def commands(doc, role, *, ballot=None, positions=None, batch=None, probe=None, 
     if role in [n["id"] for n in r]:
         return [[binary("mucql_rdma_paxos"), "server", str(ports["ordering"]), dev]]
     if role == dat["id"]:
-        return [[binary("mucql_verbs_release"), "server", str(ports["data"]), dev, "4096"]]
+        slots = b["paxos_slots"] + 2 * b["locks"] + 32 if live else 4096
+        return [[binary("mucql_verbs_release"), "server", str(ports["data"]), dev, str(slots)]]
     cn = nodes[role]
-    return [[binary("mucql_lock_e2e"), "worker", dat["ip"] + ":" + str(ports["coordinator"]),
+    return [[binary("mucql_lock_live" if live else "mucql_lock_e2e"), "worker", dat["ip"] + ":" + str(ports["coordinator"]),
              str(i), cn["ip"], str(ports["worker_base"] + i), dev] for i in workers_for(doc, role)]
 
 
@@ -170,6 +198,8 @@ def main():
     cmds = commands(doc, args.role, ballot=args.ballot, positions=args.positions,
                     batch=args.batch, probe=args.probe, work_ns=args.work_ns)
     env = dict(os.environ, MUCQL_IB_PORT=str(doc["ib_port"]))
+    if doc["benchmark"].get("mode") == "live":
+        env["MUCQL_PAXOS_SLOTS"] = str(doc["benchmark"]["paxos_slots"])
     for line in cmds:
         print("MUCQL_IB_PORT=" + str(doc["ib_port"]) + " " + shlex.join(line), flush=True)
     if args.action == "print":
@@ -186,7 +216,8 @@ def main():
         return
     if args.role in ("coordinator", "ordering"):
         if args.role == "coordinator":
-            env["MUCQL_ORDER_BATCH"] = str(args.batch or doc["benchmark"]["order_batch"])
+            if doc["benchmark"].get("mode") != "live":
+                env["MUCQL_ORDER_BATCH"] = str(args.batch or doc["benchmark"]["order_batch"])
         subprocess.run(cmds[0], check=True, env=env)
         return
     logdir = Path(args.log_dir)

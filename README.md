@@ -15,12 +15,33 @@ cd ~/rdmaLock && git pull --ff-only && python3 tools/apt/run_suite.py
 This deploys the exact repository commit, builds all machines, runs the JSON
 smoke-test matrix, verifies outcomes and gathers CSV/log files locally.
 [Configuration and larger test suites](tools/apt/AUTOMATION.md).
-**Scope:** current automation supports fixed-batch tests only; output is not
-labeled as steady-state DecLock-comparable throughput.
+**Scope:** default smoke tests retain the old fixed-batch paths. A separate
+**live CN-admitted** benchmark is available below; DecLock execution is not yet
+a supported backend, so no head-to-head throughput claim is implied.
+
+## Live locking and reproducible ablations
+
+The `mucql_lock_live` binary accepts real, continuously generated JOIN requests
+from dedicated CN worker processes. It commits JOIN and bounded PREPARE ranges
+while previously prepared clients execute and hand off locks. All operations
+include an actual completed RDMA WRITE to protected data. The failure-free,
+nonrecycling live mode is distinctly labeled from the old preprepared benchmark.
+
+```bash
+# From the single configured CloudLab controller, after editing CN IPs once:
+python3 tools/apt/run_suite.py --suite tools/apt/suites/live_smoke.json
+# After hardware validation:
+python3 tools/apt/run_suite.py --suite tools/apt/suites/live_ablations.json
+```
+
+Live results include latency percentiles, throughput, actual JOIN batch
+occupancy, PREPARE-record counts and paired optimization speedups in
+`ablations.csv`. The runner rejects unsupported DecLock configurations instead
+of making synthetic claims. [Live test scope and limitations](tools/apt/LIVE.md).
 
 ## Dedicated CN nodes and batched ordering
 
-The Apt launcher accepts a JSON topology with separate replica, memory, and client nodes, and can start multiple independent worker processes on each CN. The ordering fast path supports up to 32 in-flight contiguous log entries per replica. [Dashboard commands](tools/apt/ISOLATED.md). The current lock test remains finite-batch; continuous request admission is not yet implemented.
+The Apt launcher accepts a JSON topology with separate replica, memory, and client nodes, and can start multiple independent worker processes on each CN. The ordering fast path supports up to 32 in-flight contiguous log entries per replica. [Dashboard commands](tools/apt/ISOLATED.md). The older `mucql_lock_e2e` test remains finite-batch; `mucql_lock_live` is the separate continuous workload.
 
 ## End-to-end exclusive locking
 
@@ -79,7 +100,7 @@ Expected output contains `One-sided RDMA phase2 committed=1000` and `ordered_ent
 
 Expected output contains `RDMA release mode=CAS operations=100000` and `ops_per_sec=...`.
 
-For a single-command-per-node setup and CSV capture, see [Apt quickstart](tools/apt/README.md).
+For dashboard-only terminals, exact commands, independent trials, and update instructions, see [CloudLab Apt quickstart](tools/apt/README.md).
 
 ## Updating
 

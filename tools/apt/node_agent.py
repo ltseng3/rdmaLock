@@ -130,7 +130,7 @@ def main():
         elif args.role == doc['data_mn']['id']:
             ready_token = 'RDMA release server IB device active'
         elif args.role == 'coordinator':
-            ready_token = 'lock coordinator listening tcp='
+            ready_token = ('LIVE coordinator listening tcp=' if doc["benchmark"].get("mode") == "live" else 'lock coordinator listening tcp=')
         else:
             ready_token = None
         (path / 'state.json').write_text(json.dumps({'pid': proc.pid, 'start_ticks': pid_start(proc.pid),

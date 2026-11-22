@@ -99,12 +99,13 @@ std::vector<Ticket> Leader::prepare(LockId lock, size_t max_count) {
   // Conservative contiguous progress: a completed release marker or a
   // *certain* deadline expiration retires a prepared position. Without a
   // release observation recovery remains conservative.
-  Position progress=0;
+  Position progress=s.progress;
   const auto now=clock_.now();
   if(now.lower>now.upper)throw std::logic_error("invalid clock bounds");
   while(progress<s.prepared &&
         (s.released.count(progress) ||
          now.lower>=s.queue[progress].deadline)) ++progress;
+  s.progress=progress;
   if(s.prepared-progress>=config_.prepared_ahead)return {};
   count=std::min(count, config_.prepared_ahead-(s.prepared-progress));
   if(count==0)return {};

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """One-command CloudLab deployment, isolated benchmark sweeps and CSV collection.
 
-Only currently implemented measurements are accepted: ordering_micro and
-prepared_e2e. Live, fair DecLock comparisons are explicitly unsupported.
+Supports single-driver ordering, precommitted handoff and live CN-admitted
+MuCQL locking. Native DecLock execution is explicitly NOT implemented.
 """
 from __future__ import annotations
 import argparse
@@ -14,6 +14,7 @@ import ipaddress
 import itertools
 import json
 import math
+import random
 import os
 from pathlib import Path
 import re
@@ -29,23 +30,78 @@ ROOT = HERE.parents[1]
 sys.path.insert(0, str(HERE))
 import isolated_cluster as cluster
 from e2e_results import extract as extract_e2e
+from profiles import profile, ABLATIONS
 
 SSH_OPTS = ['-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new',
             '-o', 'ConnectTimeout=8', '-o', 'ServerAliveInterval=10', '-o', 'ServerAliveCountMax=3']
 WORKDIR = 'rdmaLock'
 REPO_URL = 'https://github.com/ltseng3/rdmaLock.git'
-SUPPORTED = {'ordering_micro', 'prepared_e2e'}
-COLUMNS = ['case', 'trial', 'kind', 'measurement_scope', 'comparable_to_declock',
+SUPPORTED = {'ordering_micro', 'prepared_e2e', 'live_e2e'}
+COLUMNS = ['case', 'scenario', 'trial', 'kind', 'measurement_scope', 'comparable_to_declock',
            'commit', 'cn_nodes', 'worker_processes', 'positions', 'batch', 'probe',
            'work_ns', 'completed', 'verified_markers', 'violations',
            'ordering_seconds', 'handoff_seconds', 'goodput_ops_per_sec',
-           'including_ordering_ops_per_sec', 'ordered_entries_per_sec', 'status']
+           'including_ordering_ops_per_sec', 'ordered_entries_per_sec', 'status',
+           'profile', 'lock_count', 'distribution', 'warmup_ms', 'measure_ms', 'seed',
+           'paxos_slots', 'max_ops', 'join_aggregate', 'phase2_window', 'prepare_range',
+           'lookahead', 'replenish_threshold', 'batch_wait_us', 'measured', 'join_batches',
+           'actual_join_batch_mean', 'prepare_records', 'latency_p50_ns', 'latency_p95_ns',
+           'latency_p99_ns', 'admission_p50_ns', 'admission_p99_ns', 'handoff_wait_p99_ns']
 
 
 def require_int(value, lo, hi, name):
     if type(value) is not int or not lo <= value <= hi:
         raise ValueError(f'{name} must be integer {lo}..{hi}')
     return value
+
+
+def expand_live(spec, topology, suite_seed, start_id):
+    """Expand a bounded LIVE factorial design; never synthesize CN joins."""
+    name = spec['name']
+    repetitions = require_int(spec.get('repetitions', 1), 1, 20, 'repetitions')
+    def axis(key, default, lo, hi):
+        values = spec.get(key, [default])
+        if not isinstance(values, list) or not values:
+            raise ValueError(f'{name}.{key} must be a nonempty list')
+        return [require_int(x, lo, hi, f'{name}.{key}') for x in values]
+    profiles = spec.get('profiles', ['raw'])
+    if not isinstance(profiles, list) or not profiles:
+        raise ValueError('LIVE profiles must be a nonempty array')
+    for p in profiles:
+        profile(p)
+    cn_values = spec.get('cn_counts', [len(topology['clients'])])
+    if cn_values == 'powers_of_two':
+        cn_values = [2**i for i in range(1, 8) if 2**i <= len(topology['clients'])]
+    if not cn_values:
+        raise ValueError('LIVE needs at least two dedicated CNs')
+    cn_counts = [require_int(x, 2, len(topology['clients']), 'cn_counts') for x in cn_values]
+    workers = axis('workers_per_cn', 1, 1, 16)
+    locks = axis('locks', 1, 1, 4096)
+    probes = axis('probes', 1, 0, 1)
+    work = axis('work_ns', 0, 0, 1000000000)
+    distributions = spec.get('distributions', ['uniform'])
+    if not isinstance(distributions, list) or not distributions or any(x not in ('uniform', 'zipf_0.99') for x in distributions):
+        raise ValueError('LIVE distributions must contain uniform or zipf_0.99')
+    warmup = require_int(spec.get('warmup_ms', 2000), 0, 60000, 'warmup_ms')
+    measurement = require_int(spec.get('measure_ms', 10000), 50, 120000, 'measure_ms')
+    slots = require_int(spec.get('paxos_slots', 1000000), 4096, 1000000, 'paxos_slots')
+    max_ops = require_int(spec.get('max_ops', 900000), 2, 1000000, 'max_ops')
+    seed = require_int(spec.get('seed', suite_seed), 1, 2**63-1, 'seed')
+    if max_ops > slots - slots//64:
+        raise ValueError('LIVE max_ops must leave safety headroom in consensus log')
+    cases=[]
+    combinations = itertools.product(profiles, cn_counts, workers, locks, distributions, probes, work)
+    for pname, cn, wpc, lock_count, distribution, probe, ns in combinations:
+        if cn*wpc>64 or any(wpc>n.get('cores', 8) for n in topology['clients'][:cn]):
+            raise ValueError('LIVE workers exceed core budget or 64 worker processes')
+        for trial in range(1, repetitions+1):
+            case=dict(name=name,kind='live_e2e',trial=trial,profile=pname,
+                cn_count=cn,workers_per_cn=wpc,locks=lock_count,distribution=distribution,
+                probe=probe,work_ns=ns,seed=seed,warmup_ms=warmup,measure_ms=measurement,
+                paxos_slots=slots,max_ops=max_ops,positions=topology['benchmark']['positions'],batch=1)
+            case['id']=f'{start_id+len(cases):04d}-{name}-{pname}-t{trial}'
+            cases.append(case)
+    return cases
 
 
 def expand_suite(suite, topology):
@@ -57,7 +113,10 @@ def expand_suite(suite, topology):
         if not isinstance(name, str) or not re.fullmatch('[a-z][a-z0-9_-]{0,35}', name):
             raise ValueError('test name must be a simple lowercase identifier')
         if kind not in SUPPORTED:
-            raise ValueError(f'{name}: unsupported kind {kind!r}; continuous/DecLock benchmarks are NOT implemented')
+            raise ValueError(f'{name}: unsupported kind {kind!r}; DecLock backend is NOT implemented')
+        if kind == 'live_e2e':
+            result.extend(expand_live(spec, topology, suite.get('seed', 2026), len(result)+1))
+            continue
         repetitions = require_int(spec.get('repetitions', 1), 1, 20, 'repetitions')
         def axis(key, default, lo, hi):
             vals = spec.get(key, [default])
@@ -104,12 +163,14 @@ def expand_suite(suite, topology):
                 result.append(case)
     if len(result) > 1000:
         raise ValueError('suite has more than 1000 trials; split it into smaller suites')
+    if suite.get('shuffle', False):
+        random.Random(suite.get('seed', 2026)).shuffle(result)
     return result
 
 
 def case_topology(original, case, ballot):
     doc = copy.deepcopy(original)
-    if case['kind'] == 'prepared_e2e':
+    if case['kind'] in ('prepared_e2e', 'live_e2e'):
         doc['clients'] = doc['clients'][:case['cn_count']]
         for cn in doc['clients']:
             cn['workers'] = case['workers_per_cn']
@@ -118,11 +179,44 @@ def case_topology(original, case, ballot):
     doc['benchmark'].update(positions=case['positions'], ballot=ballot,
                             order_batch=case['batch'], probe=case['probe'],
                             work_ns=case['work_ns'])
+    if case['kind'] == 'live_e2e':
+        p = profile(case['profile'])
+        doc['benchmark'].update(mode='live', **p, paxos_slots=case['paxos_slots'],
+            max_ops=case['max_ops'], warmup_ms=case['warmup_ms'],
+            measure_ms=case['measure_ms'], locks=case['locks'],
+            zipf=int(case['distribution']=='zipf_0.99'), seed=case['seed'])
     cluster.validate(doc)
     return doc
 
 
+def extract_live(text):
+    lines=[line for line in text.splitlines() if line.startswith('LIVE_E2E ')]
+    if len(lines)!=1:
+        raise ValueError('expected exactly one LIVE_E2E line')
+    result=dict(re.findall(r'([a-z0-9_]+)=([^\s]+)',lines[0]))
+    needed=('status','scope','workers','locks','warmup_ms','measure_ms','completed','measured',
+            'joins','verified_markers','violations','join_aggregate','phase2_window',
+            'prepare_range','lookahead','replenish_threshold','batch_wait_us',
+            'actual_join_batch_mean','prepare_records','goodput_ops_per_sec',
+            'latency_p50_ns','latency_p95_ns','latency_p99_ns',
+            'admission_p50_ns','admission_p99_ns','handoff_wait_p99_ns')
+    if any(key not in result for key in needed):
+        raise ValueError('incomplete LIVE_E2E output')
+    if result['status']!='PASS' or result['scope']!='live_steady_state':
+        raise ValueError('LIVE result is not a PASS steady-state sample')
+    if (int(result['completed'])!=int(result['joins']) or
+        int(result['verified_markers'])!=int(result['joins']) or
+        int(result['measured'])<1 or int(result['violations'])!=0):
+        raise ValueError('LIVE completion/marker/ownership mismatch')
+    for key in ('goodput_ops_per_sec','actual_join_batch_mean'):
+        if not math.isfinite(float(result[key])) or float(result[key])<=0:
+            raise ValueError('invalid LIVE metric '+key)
+    return result
+
+
 def parse_summary(kind, text):
+    if kind == 'live_e2e':
+        return extract_live(text)
     if kind == 'prepared_e2e':
         d = extract_e2e(text)
         for f in ('goodput_ops_per_sec', 'including_ordering_ops_per_sec'):
@@ -228,7 +322,7 @@ def benchmark(ex, case, topology, commit, session, run_root, ballot, timeout):
     cfg_name = job
     doc = case_topology(topology, case, ballot)
     machines = doc['replicas'] + [doc['data_mn']]
-    if case['kind'] == 'prepared_e2e':
+    if case['kind'] in ('prepared_e2e', 'live_e2e'):
         machines += doc['clients']
     conf = json.dumps(doc, indent=2) + '\n'
     for node in machines:
@@ -245,7 +339,7 @@ def benchmark(ex, case, topology, commit, session, run_root, ballot, timeout):
                 wait_for(ex, node, cfg_name, job + '-' + role, role, ready=True, timeout=25)
         for replica in doc['replicas']:
             start(replica, replica['id'], True)
-        if case['kind'] == 'prepared_e2e':
+        if case['kind'] in ('prepared_e2e', 'live_e2e'):
             start(doc['data_mn'], doc['data_mn']['id'], True)
             # Check from first CN, never on the data MN itself.
             first = doc['clients'][0]
@@ -275,15 +369,35 @@ def benchmark(ex, case, topology, commit, session, run_root, ballot, timeout):
         if case['kind'] == 'prepared_e2e':
             if int(summary['positions']) != case['positions'] or int(summary['workers']) != sum(x['workers'] for x in doc['clients']):
                 raise ValueError('result does not match requested case')
+        elif case['kind'] == 'live_e2e':
+            if (int(summary['workers']) != sum(x['workers'] for x in doc['clients']) or
+                int(summary['locks']) != case['locks'] or
+                int(summary['measure_ms']) != case['measure_ms'] or
+                int(summary['warmup_ms']) != case['warmup_ms']):
+                raise ValueError('LIVE result does not match request')
+            for k in ('join_aggregate','phase2_window','prepare_range','lookahead','replenish_threshold','batch_wait_us'):
+                if int(summary[k]) != doc['benchmark'][k]:
+                    raise ValueError('LIVE reported knob differs: '+k)
         elif int(summary['committed']) != case['positions'] or int(summary['batch']) != case['batch']:
             raise ValueError('ordering result does not match requested case')
         row = {key: '' for key in COLUMNS}
-        row.update(case=case['id'], trial=case['trial'], kind=case['kind'],
-                   measurement_scope='precommitted_handoff' if case['kind']=='prepared_e2e' else 'single_driver_ordering',
+        row.update(case=case['id'], scenario=case['name'],trial=case['trial'], kind=case['kind'],
+                   measurement_scope=('precommitted_handoff' if case['kind']=='prepared_e2e' else
+                                      'cn_admitted_bounded_live' if case['kind']=='live_e2e' else
+                                      'single_driver_ordering'),
                    comparable_to_declock='NO', commit=commit,
                    cn_nodes=case['cn_count'],worker_processes=case['cn_count']*case['workers_per_cn'],
                    positions=case['positions'],batch=case['batch'],probe=case['probe'],work_ns=case['work_ns'],status='PASS')
-        if case['kind'] == 'prepared_e2e':
+        if case['kind'] == 'live_e2e':
+            row.update(profile=case['profile'],lock_count=case['locks'],distribution=case['distribution'],
+                warmup_ms=case['warmup_ms'],measure_ms=case['measure_ms'],seed=case['seed'],
+                paxos_slots=case['paxos_slots'],max_ops=case['max_ops'])
+            for k in ('join_aggregate','phase2_window','prepare_range','lookahead','replenish_threshold',
+                      'batch_wait_us','measured','join_batches','actual_join_batch_mean','prepare_records',
+                      'latency_p50_ns','latency_p95_ns','latency_p99_ns','admission_p50_ns','admission_p99_ns',
+                      'handoff_wait_p99_ns','goodput_ops_per_sec','completed','verified_markers','violations'):
+                row[k]=summary[k]
+        elif case['kind'] == 'prepared_e2e':
             for f in ('completed', 'verified_markers', 'violations', 'ordering_seconds',
                       'handoff_seconds', 'goodput_ops_per_sec', 'including_ordering_ops_per_sec'):
                 row[f] = summary[f]
@@ -313,19 +427,74 @@ def benchmark(ex, case, topology, commit, session, run_root, ballot, timeout):
 
 
 def summarize(rows, path):
+    """Never merge prepared handoff, ordering-only and LIVE measurements."""
     groups = {}
     for row in rows:
         if row['status'] != 'PASS':
             continue
-        field = 'goodput_ops_per_sec' if row['kind']=='prepared_e2e' else 'ordered_entries_per_sec'
-        key = (row['kind'],row['cn_nodes'],row['worker_processes'],row['positions'],row['batch'],row['probe'],row['work_ns'])
+        field = 'ordered_entries_per_sec' if row['kind']=='ordering_micro' else 'goodput_ops_per_sec'
+        key = (row['kind'], row.get('scenario',''), row.get('profile',''), row['cn_nodes'],
+               row['worker_processes'], row['positions'], row['batch'], row['probe'], row['work_ns'],
+               row.get('lock_count',''), row.get('distribution',''), row.get('warmup_ms',''),
+               row.get('measure_ms',''), row.get('seed',''))
         groups.setdefault(key, []).append(float(row[field]))
-    with path.open('w',newline='') as fp:
-        w = csv.writer(fp)
-        w.writerow(['kind','cn_nodes','workers','positions','batch','probe','work_ns','trials','median_ops_per_sec','min_ops_per_sec','max_ops_per_sec','comparable_to_declock'])
-        for key, values in sorted(groups.items()):
+    with path.open('w', newline='') as fp:
+        w=csv.writer(fp)
+        w.writerow(['kind','scenario','profile','cn_nodes','workers','positions','batch','probe',
+                    'work_ns','locks','distribution','warmup_ms','measure_ms','seed',
+                    'trials','median_ops_per_sec','min_ops_per_sec','max_ops_per_sec','comparable_to_declock'])
+        for key,values in sorted(groups.items(),key=lambda p:str(p[0])):
             w.writerow([*key,len(values),f'{statistics.median(values):.2f}',
                         f'{min(values):.2f}',f'{max(values):.2f}','NO'])
+
+
+def write_ablations(rows, path):
+    """Paired trial ratios, deterministic bootstrap median CI (not a p-value).
+
+    Controls and treatments must share the SAME measured external workload.
+    Missing/failed pairs are reported, never assumed to have zero throughput.
+    """
+    groups={}
+    for row in rows:
+        if row['kind']!='live_e2e':
+            continue
+        key=(row.get('scenario'),row.get('cn_nodes'),row.get('worker_processes'),
+             row.get('lock_count'),row.get('distribution'),row.get('work_ns'),
+             row.get('probe'),row.get('warmup_ms'),row.get('measure_ms'),row.get('seed'))
+        groups.setdefault(key,{})[(row.get('profile'),row['trial'])]=row
+    with path.open('w',newline='') as f:
+        writer=csv.writer(f)
+        writer.writerow(['scenario','cn_nodes','workers','locks','distribution','work_ns','probe',
+            'warmup_ms','measure_ms','seed','effect','control','treatment',
+            'matched_trials','control_median_ops','treatment_median_ops',
+            'median_speedup','median_gain_pct','bootstrap95_low','bootstrap95_high','status'])
+        for key,items in sorted(groups.items(),key=lambda x:str(x[0])):
+            for effect,a,b in ABLATIONS:
+                trials=sorted({trial for profile_name,trial in items if profile_name in (a,b)})
+                if not any(p==a for p,t in items) or not any(p==b for p,t in items):
+                    continue
+                pairs=[]
+                for t in trials:
+                    left,right=items.get((a,t)),items.get((b,t))
+                    if left and right and left['status']=='PASS' and right['status']=='PASS':
+                        ca,cb=float(left['goodput_ops_per_sec']),float(right['goodput_ops_per_sec'])
+                        if ca>0 and cb>0:pairs.append((ca,cb))
+                status='PASS' if len(pairs)==len(trials) else 'INCOMPLETE'
+                if pairs:
+                    ratios=[b/a for a,b in pairs]
+                    median=statistics.median(ratios)
+                    ca=statistics.median(a for a,b in pairs)
+                    cb=statistics.median(b for a,b in pairs)
+                    low=high=''
+                    if len(pairs)>=3:
+                        rng=random.Random(2026)
+                        sample=[statistics.median(rng.choices(ratios,k=len(ratios))) for _ in range(2000)]
+                        sample.sort();low=f'{sample[49]:.4f}';high=f'{sample[1949]:.4f}'
+                    values=[f'{ca:.2f}',f'{cb:.2f}',f'{median:.4f}',f'{(median-1)*100:.2f}',low,high]
+                else:
+                    values=['']*6
+                writer.writerow([*key,effect,a,b,len(pairs),*values,status])
+
 
 
 def main():
@@ -348,8 +517,10 @@ def main():
     print(f'Configured {len(cases)} independent trials on {len(machines)} physical nodes; CNs never share MNs.',flush=True)
     for c in cases:
         print(f'  {c["id"]} {c["kind"]} positions={c["positions"]} batch={c["batch"]} '
-              f'CN={c["cn_count"]} workers/CN={c["workers_per_cn"]} probe={c["probe"]}',flush=True)
-    print('WARNING: fixed-batch prepared handoff and single-driver ordering only. NO apples-to-apples DecLock curves.',flush=True)
+              f'CN={c["cn_count"]} workers/CN={c["workers_per_cn"]} probe={c["probe"]}'
+              f' profile={c.get("profile", "-")} locks={c.get("locks", "-")}',flush=True)
+    print('Measurement families: live CN-admitted MuCQL, prepared-handoff, or ordering-only. '
+          'DecLock adapter not yet available; do not present these as head-to-head curves.',flush=True)
     if args.dry_run:
         return 0
     if args.timeout<30 or args.timeout>3600:
@@ -361,7 +532,7 @@ def main():
     executor = Executor(username=args.ssh_user, checkout=ROOT, local_ips=ips,repo_dir=args.remote_dir)
     needed_ids = {x['id'] for x in topo['replicas']+[topo['data_mn']]}
     for c in cases:
-        if c['kind']=='prepared_e2e':
+        if c['kind'] in ('prepared_e2e','live_e2e'):
             needed_ids.update(x['id'] for x in topo['clients'][:c['cn_count']])
     needed = [n for n in machines if n['id'] in needed_ids]
     lock_file = ROOT/'results'/'automation'/'runner.lock'
@@ -383,7 +554,7 @@ def main():
     if args.bootstrap_only:
         return 0
     (root/'manifest.json').write_text(json.dumps({'commit':sha,'topology':topo,'suite':str(args.suite),
-                                                  'cases':cases,'measurement_scope':'NOT_COMPARABLE_TO_DECLOCK'},indent=2))
+                                                  'cases':cases,'measurement_scope':'NO_DECLOCK_BASELINE_YET'},indent=2))
     summary_csv = root/'runs.csv'
     rows = []
     with summary_csv.open('w',newline='') as f:
@@ -397,9 +568,13 @@ def main():
                 print('  PASS:',row['goodput_ops_per_sec'] or row['ordered_entries_per_sec'],'ops/s',flush=True)
             except Exception as exc:
                 row={k:'' for k in COLUMNS}
-                row.update(case=case['id'],trial=case['trial'],kind=case['kind'],
+                row.update(case=case['id'],scenario=case['name'],trial=case['trial'],kind=case['kind'],
                            measurement_scope='failed',comparable_to_declock='NO',commit=sha,
-                           positions=case['positions'],batch=case['batch'],status='FAIL')
+                           positions=case['positions'],batch=case['batch'],status='FAIL',
+                           profile=case.get('profile',''),lock_count=case.get('locks',''),
+                           distribution=case.get('distribution',''),work_ns=case.get('work_ns',''),
+                           probe=case.get('probe',''),warmup_ms=case.get('warmup_ms',''),
+                           measure_ms=case.get('measure_ms',''),seed=case.get('seed',''))
                 (root/case['id']/'failure.txt').parent.mkdir(parents=True,exist_ok=True)
                 (root/case['id']/'failure.txt').write_text(repr(exc)+'\n')
                 print('  FAILED:',exc,flush=True)
@@ -407,7 +582,9 @@ def main():
             writer.writerow(row)
             f.flush()
     summarize(rows,root/'summary.csv')
-    print('\nRaw logs:',root, '\nRun records:',summary_csv,'\nGrouped medians:',root/'summary.csv',flush=True)
+    write_ablations(rows,root/'ablations.csv')
+    print('\nRaw logs:',root, '\nRun records:',summary_csv,'\nGrouped medians:',root/'summary.csv',
+          '\nPaired ablations:',root/'ablations.csv',flush=True)
     text = (root/'summary.csv').read_text()
     print('\nSummary (CSV):\n' + '\n'.join(text.splitlines()[:25]),flush=True)
     if len(text.splitlines())>25:

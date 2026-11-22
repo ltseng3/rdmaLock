@@ -65,6 +65,31 @@ and maximum ops/sec; `runs.csv` retains every trial, including failures. A
 failed run is **never** silently treated as zero throughput or included in a
 median. The runner exits nonzero if any configuration fails.
 
+## Live CN-admitted smoke and MuCQL ablations
+
+These new suites exercise **ongoing CN-generated JOIN and bounded online
+PREPARE**, not an offline-prepared queue:
+
+```bash
+cd ~/rdmaLock
+python3 tools/apt/run_suite.py --suite tools/apt/suites/live_smoke.json
+# Then, after smoke and owner-probe checks pass on actual hardware:
+python3 tools/apt/run_suite.py --suite tools/apt/suites/live_ablations.json
+# Additional CN and lock-distribution scaling:
+python3 tools/apt/run_suite.py --suite tools/apt/suites/live_scaling.json
+```
+
+The live suites produce an additional `ablations.csv` with matched paired
+speedups and gains; old fixed-batch suites remain unchanged. The full ablation
+suite includes **320 independent trials** at its default two CNs and five
+repetitions per case. Control/treatment order is shuffled with a fixed seed.
+See [Live semantics, limitations and fair-comparison requirements](LIVE.md).
+
+**Note:** Live MuCQL throughput is measured (not a precommit handoff-only
+metric), but DecLock baseline execution is not yet integrated. Every result
+remains labeled `comparable_to_declock=NO` until the shared DecLock benchmark
+is implemented and validated.
+
 ## Run the larger ablation suite
 
 ```bash
@@ -104,12 +129,14 @@ The available modes are strictly labeled:
   `goodput_ops_per_sec` field excludes ordering; the
   `including_ordering_ops_per_sec` field includes sequential batch preparation.
 
-Neither mode is a true steady-state DecLock comparison. Every CSV row includes
-`comparable_to_declock=NO`. The runner explicitly **rejects** unsupported
-`live`, `raw`, or `declock` modes instead of inventing results. The next
-protocol implementation must add real CN-generated JOIN admission, bounded
-online PREPARE and continuously timed acquire/release loops. Those can use the
-same automation and result format after the backends are implemented.
+The two older modes are not a steady-state DecLock comparison. The new
+`live_e2e` mode measures online client-generated JOIN, PREPARE and handoff, but
+DecLock integration and workload parity are still outstanding. Every CSV row includes
+`comparable_to_declock=NO`. The runner rejects an unavailable `declock`
+backend rather than inventing results. Named `raw`, `full` and per-optimization
+profiles are selected through the `live_e2e` suite; these are not separate
+runner test kinds. A native DecLock execution adapter and common validation
+remain outstanding.
 
 Both the protected operation (one completed 8-byte RDMA WRITE) and the
 independent owner probe remain explicit. Never mix probe=1 and probe=0 results

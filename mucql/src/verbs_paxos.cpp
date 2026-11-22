@@ -145,7 +145,7 @@ struct Server {
   Dev dev;RdmaPaxosOptions opts;std::mutex mu;uint64_t promised{};
   std::map<uint64_t,Accepted> accepted;
   std::shared_ptr<Active> current;
-  explicit Server(const RdmaPaxosOptions&o):dev(o),opts(o){if(o.slots<1||o.slots>100000)fail("slots range");}
+  explicit Server(const RdmaPaxosOptions&o):dev(o),opts(o){if(o.slots<1||o.slots>1000000)fail("slots range");}
   void serve(int c){
     try{
       set_timeout(c);Control hello{};recv_all(c,&hello,sizeof(hello));

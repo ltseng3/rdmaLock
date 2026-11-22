@@ -122,12 +122,25 @@ std::vector<Record> PaxosJournal::commit_batch(std::vector<Record> proposals) {
   if(proposals.empty())return {};
   if(proposals.size()>32)throw std::invalid_argument("batch must be 1..32");
   for(size_t i=0;i<proposals.size();++i)proposals[i].index=decided_.size()+i+1;
-  if(!accept_batch_to_majority(proposals)){
-    leader_=false; // even a partly chosen suffix is not exposed until takeover
-    throw std::runtime_error("batch phase 2 quorum failed; recover before retry");
+  // Keep JOIN aggregation and RNIC phase-2 pipelining independently tunable.
+  // Failed partial prefixes are NOT exposed: a new ballot must adopt them.
+  for(size_t off=0;off<proposals.size();off+=phase2_window_){
+    auto stop=std::min(proposals.size(),off+phase2_window_);
+    std::vector<Record> window(proposals.begin()+off,proposals.begin()+stop);
+    if(!accept_batch_to_majority(window)){
+      leader_=false;
+      throw std::runtime_error("phase 2 window quorum failed; recover before retry");
+    }
   }
   decided_.insert(decided_.end(),proposals.begin(),proposals.end());
   return proposals;
+}
+void PaxosJournal::set_phase2_window(size_t n){
+  if(n<1||n>32)throw std::invalid_argument("phase2 window must be 1..32");
+  std::lock_guard<std::mutex> l(mu_);phase2_window_=n;
+}
+size_t PaxosJournal::decided_count() const {
+  std::lock_guard<std::mutex> l(mu_);return decided_.size();
 }
 std::vector<Record> PaxosJournal::snapshot() const {
   std::lock_guard<std::mutex> l(mu_);

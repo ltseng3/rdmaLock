@@ -16,6 +16,11 @@ int main(int argc,char**argv){
       return 2;}
     RdmaPaxosOptions o;
     if(const char* p=std::getenv("MUCQL_IB_PORT"))o.port=static_cast<uint8_t>(std::stoul(p));
+    if(const char* p=std::getenv("MUCQL_PAXOS_SLOTS")){
+      const auto n=std::stoull(p);
+      if(n<16||n>1000000)throw std::invalid_argument("MUCQL_PAXOS_SLOTS must be 16..1000000");
+      o.slots=static_cast<uint32_t>(n);
+    }
     if(std::string(argv[1])=="server"){
       for(int i=3;i<argc;i++){
         if(std::string(argv[i])=="--allow-experimental-takeover")o.allow_experimental_takeover=true;

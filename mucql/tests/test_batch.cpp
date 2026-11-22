@@ -25,8 +25,15 @@ int main(){
   assert(duplicate);assert(l.ordered(7).size()==32);
   PaxosJournal j2(q,102);j2.take_over();
   Leader l2(j2,clk);assert(l2.ordered(7).size()==32);
+  for(auto n:{0,33}){
+    bool bad=false;try{j2.set_phase2_window(size_t(n));}catch(const std::invalid_argument&){bad=true;}
+    assert(bad);
+  }
+  j2.set_phase2_window(1); // same aggregated JOINs; serial phase-2 windows
+
   q.nodes()[2]->crash(true);
   auto next=l2.join_batch(7,{{101,1},{102,1}});
+  assert(j2.decided_count()==35);
   assert(next.size()==2&&next[0].position==32&&next[1].position==33);
   q.nodes()[1]->crash(true);
   bool failed=false;
@@ -38,7 +45,7 @@ int main(){
   q.nodes()[1]->crash(false);
   PaxosJournal j3(q,103);j3.take_over();
   Leader l3(j3,clk);
-  assert(l3.ordered(7).size()==36); // adopted unacknowledged batch
-  for(size_t i=0;i<36;i++)assert(l3.ordered(7)[i].position==i);
+  assert(l3.ordered(7).size()==35); // adopted first accepted slot of failed serial window
+  for(size_t i=0;i<35;i++)assert(l3.ordered(7)[i].position==i);
   std::cout<<"PASS batch append, duplicate rejection, quorum failure, takeover adoption\n";
 }

@@ -1,0 +1,25 @@
+{
+  "seed": 2026,
+  "shuffle": true,
+  "tests": [
+    {
+      "name": "live-optimization-ablation",
+      "kind": "live_e2e",
+      "profiles": [
+        "raw", "join_control", "join_aggregation", "phase2_control", "phase2_pipelined",
+        "prepare_control", "prepare_compressed", "lookahead",
+        "replenish_control", "replenish_proactive",
+        "full_no_join", "full_no_phase2", "full_no_prepare",
+        "full_no_lookahead", "full_no_proactive", "full"
+      ],
+      "cn_counts": [2],
+      "workers_per_cn": [4, 8],
+      "locks": [1, 64],
+      "distributions": ["uniform"],
+      "probes": [0], "work_ns": [0],
+      "warmup_ms": 2000, "measure_ms": 10000,
+      "paxos_slots": 1000000, "max_ops": 900000,
+      "repetitions": 5
+    }
+  ]
+}

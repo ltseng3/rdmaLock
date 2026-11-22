@@ -1,0 +1,19 @@
+{
+  "seed": 2026,
+  "shuffle": true,
+  "tests": [
+    {
+      "name": "live-client-scaling",
+      "kind": "live_e2e",
+      "profiles": ["raw", "full"],
+      "cn_counts": "powers_of_two",
+      "workers_per_cn": [1, 2, 4, 8],
+      "locks": [1, 64, 1024],
+      "distributions": ["uniform", "zipf_0.99"],
+      "probes": [0], "work_ns": [0, 1000],
+      "warmup_ms": 2000, "measure_ms": 10000,
+      "paxos_slots": 1000000, "max_ops": 900000,
+      "repetitions": 5
+    }
+  ]
+}

@@ -28,6 +28,7 @@ jobs:
           test -x mucql/build-ci/mucql_rdma_paxos
           test -x mucql/build-ci/mucql_verbs_release
           test -x mucql/build-ci/mucql_lock_e2e
+          test -x mucql/build-ci/mucql_lock_live
       - name: Unit and mocked RDMA tests
         run: ctest --test-dir mucql/build-ci --output-on-failure
       - name: Independent TCP quorum smoke test

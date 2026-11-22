@@ -108,6 +108,8 @@ class Leader {
     std::vector<Ticket> queue;
     std::map<std::pair<ClientId,RequestId>, Position> requests;
     size_t prepared{0};
+    // Certified contiguous retired/expired frontier, monotone within leader epoch.
+    size_t progress{0};
     std::unordered_map<Position, GrantId> released;
   };
   void replay(const Record& r);

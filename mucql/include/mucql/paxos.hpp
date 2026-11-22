@@ -67,6 +67,8 @@ class PaxosJournal final: public Journal {
   // Commit an ordered contiguous batch; on any indeterminate operation the
   // caller receives NO acknowledgements and must recover at a higher ballot.
   std::vector<Record> commit_batch(std::vector<Record> proposals);
+  void set_phase2_window(size_t n);
+  size_t decided_count() const;
   std::vector<Record> commit_many(std::vector<Record> proposals) override {
     return commit_batch(std::move(proposals));
   }
@@ -74,6 +76,7 @@ class PaxosJournal final: public Journal {
  private:
   bool accept_to_majority(const Record& r);
   bool accept_batch_to_majority(const std::vector<Record>& records);
+  size_t phase2_window_{32};
   LocalQuorum& quorum_;
   uint64_t ballot_;
   mutable std::mutex mu_;

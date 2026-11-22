@@ -270,7 +270,7 @@ class Executor:
         self.shell(node, 'mkdir -p "$HOME/' + self.repo_dir + '/results/automation/configs" && cat > "' + remote + '"',
                    input_text=json_text, timeout=15)
 
-    def bootstrap(self, node, commit, ib_device, ib_port, install_deps=False):
+    def bootstrap(self, node, commit, ib_device, ib_port, install_deps=False, auto_deps=True):
         script = ('set -euo pipefail; '
                   'if [ ! -d "$HOME/' + self.repo_dir + '/.git" ]; then '
                   'git clone ' + shlex.quote(REPO_URL) + ' "$HOME/' + self.repo_dir + '"; fi; '
@@ -279,9 +279,10 @@ class Executor:
                   'if [ "$(git rev-parse HEAD)" != ' + shlex.quote(commit) + ' ]; then git checkout --detach ' + shlex.quote(commit) + '; fi; '
                   'test "$(git rev-parse HEAD)" = ' + shlex.quote(commit) + '; '
                   + ('sudo -n bash tools/apt/setup.sh; ' if install_deps else '') +
+                  'bash tools/apt/ensure_deps.sh ' + ('auto' if auto_deps else 'check') + '; ' +
                   'bash tools/apt/build.sh; bash tools/apt/check.sh '
                   + shlex.quote(ib_device) + ' ' + str(ib_port))
-        return self.shell(node, script, timeout=360)
+        return self.shell(node, script, timeout=900 if (install_deps or auto_deps) else 360)
 
 
 def local_ip_set():
@@ -506,7 +507,9 @@ def main():
     ap.add_argument('--timeout', type=int, default=180)
     ap.add_argument('--dry-run', action='store_true')
     ap.add_argument('--bootstrap-only', action='store_true')
-    ap.add_argument('--install-deps', action='store_true', help='run Apt package setup on nodes using passwordless sudo')
+    deps = ap.add_mutually_exclusive_group()
+    deps.add_argument('--install-deps', action='store_true', help='force full Apt/RDMA tools setup on nodes (passwordless sudo)')
+    deps.add_argument('--no-auto-deps', action='store_true', help='check prerequisites only; never install packages')
     ap.add_argument('--max-cases', type=int, default=0)
     args = ap.parse_args()
     topo, _ = cluster.read(args.topology)
@@ -547,8 +550,14 @@ def main():
     (root/'bootstrap').mkdir(parents=True)
     print('Checking SSH and building exact commit',sha,flush=True)
     for node in needed:
-        executor.shell(node, 'hostname && id -un', timeout=18)
-        out = executor.bootstrap(node, sha, topo['device'], topo['ib_port'], install_deps=args.install_deps)
+        print(f'  {node["id"]}: checking prerequisites and building ...', flush=True)
+        try:
+            executor.shell(node, 'hostname && id -un', timeout=18)
+            out = executor.bootstrap(node, sha, topo['device'], topo['ib_port'],
+                                     install_deps=args.install_deps, auto_deps=not args.no_auto_deps)
+        except Exception as exc:
+            (root/'bootstrap'/f'{node["id"]}.error.txt').write_text(str(exc)+'\n')
+            raise
         (root/'bootstrap'/f'{node["id"]}.log').write_text(out)
         print(f'  {node["id"]}: build and verbs check OK ({len(out)} chars)',flush=True)
     if args.bootstrap_only:

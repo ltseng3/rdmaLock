@@ -34,11 +34,18 @@ forwarding through normal CloudLab facilities. The automation will not disable
 SSH authentication, copy SSH private keys, or require GitHub credentials.
 
 The controller sends each trial configuration to all nodes automatically; only
-the controller needs `topology.local.json`. The nodes need git, cmake, libibverbs
-and an active mlx4 InfiniBand port.
-If dependencies aren't installed, run once with `--install-deps` (requires
-passwordless sudo on the target hosts). Run from the same user account on all
-hosts, or pass `--ssh-user NAME`.
+the controller needs `topology.local.json`. The nodes need git to clone the repository and an active mlx4 InfiniBand port.
+The one-command runner now **checks each host for CMake, C++ build tools,
+Python, libibverbs development headers, and RDMA diagnostic utilities**. Missing
+packages are installed automatically before the first build, using `sudo -n`
+and Debian/Ubuntu `apt-get`; already provisioned nodes skip installation.
+This happens outside benchmark measurement. A fresh CN no longer needs you to
+manually install CMake. Passwordless sudo is required only if packages are missing.
+Use `--no-auto-deps` for check-only/offline deployments, or `--install-deps` to
+force the broader optional RDMA package setup (`tools/apt/setup.sh`).
+If the image lacks apt-get or passwordless sudo, the run stops with an explicit
+error rather than attempting to prompt or proceeding with a partial build.
+Run from the same user account on all hosts, or pass `--ssh-user NAME`.
 
 ## One command to build, test, gather logs and summarize
 

@@ -111,6 +111,7 @@ if(MUCQL_MOCK_VERBS_TEST)
   add_test(NAME mucql_rdma_quorum_mock COMMAND mucql_paxos_rdma_mock_test)
 endif()
 
+if(MUCQL_MOCK_VERBS_TEST)
 # Dedicated frame, receive-ring wraparound and cancellation regression.
 add_executable(mucql_live_control_mock_test tests/test_live_control_mock.cpp)
 target_link_libraries(mucql_live_control_mock_test PRIVATE mucql_mock_verbs Threads::Threads)
@@ -126,3 +127,4 @@ set_tests_properties(mucql_live_hot_raw mucql_live_hot_optimized
   mucql_live_multilock mucql_live_uninstrumented
   mucql_live_16clients_hot_mock mucql_live_16clients_zipf_mock
   PROPERTIES ENVIRONMENT "MUCQL_CN_TRANSPORT=tcp")
+endif()

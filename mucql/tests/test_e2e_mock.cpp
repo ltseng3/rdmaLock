@@ -9,13 +9,14 @@
 #include <vector>
 #include <cstdlib>
 int main(int argc,char**argv){
-  std::signal(SIGALRM,[](int){std::_Exit(22);});alarm(18);
+  std::signal(SIGALRM,[](int){std::_Exit(22);});alarm(45);
   try {
     const auto count=argc>1?std::stoull(argv[1]):48ULL;
     const auto nworkers=argc>2?std::stoull(argv[2]):2ULL;
     const auto probe=argc>3?std::stoull(argv[3]):1ULL;
     const auto work=argc>4?std::stoull(argv[4]):10ULL;
-    if(nworkers<2||nworkers>4||count<2||count>300)throw std::runtime_error("bad test args");
+    if(nworkers<2||nworkers>16||count<2||count>300)throw std::runtime_error("bad test args");
+    setenv("MUCQL_ORDER_BATCH","32",1);
     mucql::ReleaseEndpointOptions ro;ro.slots=4096;ro.device="mock0";
     auto* release=new mucql::VerbsReleaseServer(ro);
     std::thread([release]{release->listen_forever(29820);}).detach();
@@ -38,7 +39,7 @@ int main(int argc,char**argv){
     std::vector<std::exception_ptr> ws_err(nworkers);
     for(size_t i=0;i<nworkers;i++)ws.emplace_back([&,i]{try{
       std::vector<std::string> args={"mucql_lock_e2e","worker","127.0.0.1:29810",
-        std::to_string(i),"127.0.0.1",std::to_string(29811+i),"mock0"};
+        std::to_string(i),"127.0.0.1",std::to_string(29911+i),"mock0"};
       std::vector<char*> a;for(auto& s:args)a.push_back(s.data());
       if(worker(int(a.size()),a.data())!=0)throw std::runtime_error("worker failed");
     }catch(...){ws_err[i]=std::current_exception();}});

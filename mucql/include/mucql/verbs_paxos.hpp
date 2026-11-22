@@ -25,6 +25,8 @@ class RdmaAcceptor final : public Acceptor {
   bool accept(uint64_t ballot,const Record& value) override;
   void begin_accept(uint64_t ballot,const Record& value) override;
   bool finish_accept() override;
+  void begin_accept_batch(uint64_t ballot,const std::vector<Record>& records) override;
+  std::vector<bool> finish_accept_batch() override;
   void crash(bool) override {}
  private:
   struct Impl;std::unique_ptr<Impl> impl_;

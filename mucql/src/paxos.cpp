@@ -95,15 +95,39 @@ void PaxosJournal::take_over() {
   leader_=true;
 }
 Record PaxosJournal::commit(Record proposal) {
+  auto records=commit_batch({proposal});
+  return records.front();
+}
+bool PaxosJournal::accept_batch_to_majority(const std::vector<Record>& records) {
+  const auto& replicas=quorum_.nodes();
+  std::vector<bool> started(replicas.size(),false);
+  for(size_t i=0;i<replicas.size();++i){
+    try{replicas[i]->begin_accept_batch(ballot_,records);started[i]=true;}
+    catch(const std::exception&){/* unavailable follower */}
+  }
+  std::vector<size_t> ack(records.size(),0);
+  for(size_t i=0;i<replicas.size();++i){
+    if(!started[i])continue;
+    try{
+      auto result=replicas[i]->finish_accept_batch();
+      if(result.size()!=records.size())continue;
+      for(size_t j=0;j<result.size();++j)if(result[j])ack[j]++;
+    }catch(const std::exception&){/* uncertain follower */}
+  }
+  return std::all_of(ack.begin(),ack.end(),[&](size_t n){return n>=quorum_.majority();});
+}
+std::vector<Record> PaxosJournal::commit_batch(std::vector<Record> proposals) {
   std::lock_guard<std::mutex> l(mu_);
   if(!leader_)throw std::runtime_error("not a prepared leader");
-  proposal.index=decided_.size()+1;
-  if(!accept_to_majority(proposal)){
-    leader_=false; // cannot safely reuse same slot for a different command
-    throw std::runtime_error("phase 2 quorum failed; recover before retry");
+  if(proposals.empty())return {};
+  if(proposals.size()>32)throw std::invalid_argument("batch must be 1..32");
+  for(size_t i=0;i<proposals.size();++i)proposals[i].index=decided_.size()+i+1;
+  if(!accept_batch_to_majority(proposals)){
+    leader_=false; // even a partly chosen suffix is not exposed until takeover
+    throw std::runtime_error("batch phase 2 quorum failed; recover before retry");
   }
-  decided_.push_back(proposal);
-  return proposal;
+  decided_.insert(decided_.end(),proposals.begin(),proposals.end());
+  return proposals;
 }
 std::vector<Record> PaxosJournal::snapshot() const {
   std::lock_guard<std::mutex> l(mu_);

@@ -28,6 +28,13 @@ class Acceptor {
     last_accept_=accept(ballot,value);
   }
   virtual bool finish_accept() {return last_accept_;}
+  // Batch posting may overlap distinct slots on one RC QP. All records are
+  // immutable once proposed; a failed batch poisons the leadership attempt.
+  virtual void begin_accept_batch(uint64_t ballot,const std::vector<Record>& records) {
+    batch_results_.clear();batch_results_.reserve(records.size());
+    for(const auto& r:records)batch_results_.push_back(accept(ballot,r));
+  }
+  virtual std::vector<bool> finish_accept_batch() {return batch_results_;}
   virtual void crash(bool down); // unavailable, memory retained (crash-stop survivor)
  private:
   std::mutex mu_;
@@ -35,6 +42,7 @@ class Acceptor {
   std::map<uint64_t,Accepted> accepted_;
   bool down_{false};
   bool last_accept_{false};
+  std::vector<bool> batch_results_;
 };
 // Acceptors may be local, TCP, or an opt-in experimental RDMA transport.
 class LocalQuorum {
@@ -56,9 +64,16 @@ class PaxosJournal final: public Journal {
   // values to establish a recoverable contiguous chosen prefix.
   void take_over();
   Record commit(Record proposal) override;
+  // Commit an ordered contiguous batch; on any indeterminate operation the
+  // caller receives NO acknowledgements and must recover at a higher ballot.
+  std::vector<Record> commit_batch(std::vector<Record> proposals);
+  std::vector<Record> commit_many(std::vector<Record> proposals) override {
+    return commit_batch(std::move(proposals));
+  }
   std::vector<Record> snapshot() const override;
  private:
   bool accept_to_majority(const Record& r);
+  bool accept_batch_to_majority(const std::vector<Record>& records);
   LocalQuorum& quorum_;
   uint64_t ballot_;
   mutable std::mutex mu_;

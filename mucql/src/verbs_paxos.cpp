@@ -6,6 +6,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <cerrno>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstring>
@@ -66,9 +67,9 @@ struct Dev {
 struct QP {
   Dev& d;ibv_cq* cq{};ibv_qp* qp{};uint32_t psn{};
   explicit QP(Dev&d):d(d),psn(gen_psn()){
-    cq=ibv_create_cq(d.ctx,32,nullptr,nullptr,0);if(!cq)fail("create cq");
+    cq=ibv_create_cq(d.ctx,128,nullptr,nullptr,0);if(!cq)fail("create cq");
     ibv_qp_init_attr init{};init.send_cq=cq;init.recv_cq=cq;init.qp_type=IBV_QPT_RC;
-    init.cap.max_send_wr=16;init.cap.max_recv_wr=2;init.cap.max_send_sge=1;init.cap.max_recv_sge=1;
+    init.cap.max_send_wr=128;init.cap.max_recv_wr=2;init.cap.max_send_sge=1;init.cap.max_recv_sge=1;
     qp=ibv_create_qp(d.pd,&init);if(!qp)fail("create QP");
     ibv_qp_attr a{};a.qp_state=IBV_QPS_INIT;a.pkey_index=0;a.port_num=d.port;
     a.qp_access_flags=IBV_ACCESS_REMOTE_WRITE|IBV_ACCESS_REMOTE_ATOMIC;
@@ -181,14 +182,24 @@ struct RdmaAcceptor::Impl {
   Dev dev;std::unique_ptr<QP> qp;RdmaPaxosOptions opts;std::string host;uint16_t port{};
   int sock{-1};uint64_t prepared_ballot{};QpWire remote{};
   ValueWire value{};uint64_t atomic_old{};ibv_mr* value_mr{};ibv_mr* atomic_mr{};
-  std::mutex mu;bool pending{false};bool poisoned{false};
+  static constexpr size_t kBatchCap=32;
+  std::array<ValueWire,kBatchCap> batch_values{};
+  std::array<uint64_t,kBatchCap> batch_old{};
+  ibv_mr* batch_values_mr{};ibv_mr* batch_old_mr{};
+  std::mutex mu;bool pending{false};bool poisoned{false};size_t pending_batch{0};
   std::map<uint64_t,ValueWire> posted; // forbid same-ballot slot equivocation
   Impl(std::string h,uint16_t p,RdmaPaxosOptions o):dev(o),opts(std::move(o)),host(std::move(h)),port(p){
     value_mr=ibv_reg_mr(dev.pd,&value,sizeof(value),IBV_ACCESS_LOCAL_WRITE);
     atomic_mr=ibv_reg_mr(dev.pd,&atomic_old,sizeof(atomic_old),IBV_ACCESS_LOCAL_WRITE);
-    if(!value_mr||!atomic_mr)fail("register local accepted buffers");
+    batch_values_mr=ibv_reg_mr(dev.pd,batch_values.data(),sizeof(batch_values),IBV_ACCESS_LOCAL_WRITE);
+    batch_old_mr=ibv_reg_mr(dev.pd,batch_old.data(),sizeof(batch_old),IBV_ACCESS_LOCAL_WRITE);
+    if(!value_mr||!atomic_mr||!batch_values_mr||!batch_old_mr)
+      fail("register local accepted buffers");
   }
-  ~Impl(){if(sock>=0)::close(sock);if(value_mr)ibv_dereg_mr(value_mr);if(atomic_mr)ibv_dereg_mr(atomic_mr);}
+  ~Impl(){if(sock>=0)::close(sock);if(value_mr)ibv_dereg_mr(value_mr);
+    if(atomic_mr)ibv_dereg_mr(atomic_mr);
+    if(batch_values_mr)ibv_dereg_mr(batch_values_mr);
+    if(batch_old_mr)ibv_dereg_mr(batch_old_mr);}
 };
 RdmaAcceptor::RdmaAcceptor(std::string host,uint16_t p,RdmaPaxosOptions o):impl_(new Impl(std::move(host),p,std::move(o))){}
 RdmaAcceptor::~RdmaAcceptor()=default;
@@ -216,7 +227,7 @@ Promise RdmaAcceptor::prepare(uint64_t ballot){
     impl_->qp->connect(impl_->remote);
     uint8_t ready=0;recv_all(impl_->sock,&ready,1);if(ready!=0x51)fail("QP handshake");
     impl_->posted.clear();
-    impl_->poisoned=false;
+    impl_->poisoned=false;impl_->pending=false;impl_->pending_batch=0;
     impl_->prepared_ballot=ballot;
     return promise;
   }catch(const std::exception&e){
@@ -229,7 +240,7 @@ bool RdmaAcceptor::accept(uint64_t ballot,const Record& r){
 }
 void RdmaAcceptor::begin_accept(uint64_t ballot,const Record&r){
   std::lock_guard<std::mutex> l(impl_->mu);
-  if(impl_->pending || impl_->poisoned)
+  if(impl_->pending || impl_->pending_batch || impl_->poisoned)
     throw std::logic_error("undrained/failed RDMA QP: recover with a higher ballot");
   if(!impl_->qp || ballot!=impl_->prepared_ballot||r.index==0||r.index>impl_->remote.slots)
     throw std::runtime_error("unprepared ballot or out-of-range slot");
@@ -274,6 +285,72 @@ bool RdmaAcceptor::finish_accept(){
   }
   impl_->pending=false;
   return impl_->atomic_old==0||impl_->atomic_old==mark(impl_->value.index);
+}
+void RdmaAcceptor::begin_accept_batch(uint64_t ballot,
+                                     const std::vector<Record>& records){
+  std::lock_guard<std::mutex> l(impl_->mu);
+  if(records.empty() || records.size()>Impl::kBatchCap)throw std::invalid_argument("bad RDMA batch size");
+  if(impl_->pending||impl_->pending_batch||impl_->poisoned)
+    throw std::logic_error("undrained/failed RDMA batch QP: recover with higher ballot");
+  if(!impl_->qp || ballot!=impl_->prepared_ballot)
+    throw std::runtime_error("RDMA batch submitted on unprepared ballot");
+  for(size_t i=0;i<records.size();++i){
+    const auto& r=records[i];
+    if(r.index==0||r.index>impl_->remote.slots ||
+       (i && r.index!=records[i-1].index+1))
+      throw std::runtime_error("invalid RDMA batch index/contiguity");
+    ValueWire w=pack(r);
+    auto prev=impl_->posted.find(r.index);
+    if(prev!=impl_->posted.end()&&std::memcmp(&prev->second,&w,sizeof(w))!=0)
+      throw std::logic_error("same-ballot RDMA batch slot equivocation");
+    impl_->batch_values[i]=w;
+    impl_->batch_old[i]=0;
+  }
+  // All local buffers have stable addresses and remain registered/pinned until
+  // every CAS CQE returns. RC QP ordering makes each slot's payload visible
+  // before its atomic marker, and orders all slots as a contiguous prefix.
+  for(size_t i=0;i<records.size();++i){
+    const auto& r=records[i];
+    impl_->posted[r.index]=impl_->batch_values[i];
+    const uint64_t base=impl_->remote.addr+(r.index-1)*sizeof(AcceptedSlot);
+    ibv_sge payload{};payload.addr=reinterpret_cast<uintptr_t>(&impl_->batch_values[i]);
+    payload.length=sizeof(ValueWire);payload.lkey=impl_->batch_values_mr->lkey;
+    ibv_sge result{};result.addr=reinterpret_cast<uintptr_t>(&impl_->batch_old[i]);
+    result.length=8;result.lkey=impl_->batch_old_mr->lkey;
+    ibv_send_wr write{};write.sg_list=&payload;write.num_sge=1;write.opcode=IBV_WR_RDMA_WRITE;
+    write.wr.rdma.remote_addr=base;write.wr.rdma.rkey=impl_->remote.rkey;
+    ibv_send_wr cas{};cas.sg_list=&result;cas.num_sge=1;
+    cas.opcode=IBV_WR_ATOMIC_CMP_AND_SWP;cas.send_flags=IBV_SEND_SIGNALED;
+    cas.wr.atomic.remote_addr=base+offsetof(AcceptedSlot,marker);
+    cas.wr.atomic.rkey=impl_->remote.rkey;cas.wr.atomic.compare_add=0;
+    cas.wr.atomic.swap=mark(r.index);
+    write.next=&cas;
+    ibv_send_wr* bad=nullptr;
+    if(ibv_post_send(impl_->qp->qp,&write,&bad)){
+      impl_->poisoned=true;
+      throw std::runtime_error("posting RDMA batch failed; QP cannot be reused");
+    }
+  }
+  impl_->pending_batch=records.size();
+}
+std::vector<bool> RdmaAcceptor::finish_accept_batch(){
+  std::lock_guard<std::mutex> l(impl_->mu);
+  const size_t n=impl_->pending_batch;
+  if(!n)return {};
+  try{
+    for(size_t i=0;i<n;++i)impl_->qp->poll();
+  }catch(const std::exception& e){
+    impl_->pending_batch=0;impl_->poisoned=true;
+    std::cerr<<"RDMA phase-2 batch completion failed: "<<e.what()<<'\n';
+    return std::vector<bool>(n,false);
+  }
+  std::vector<bool> result;
+  for(size_t i=0;i<n;++i){
+    auto idx=impl_->batch_values[i].index;
+    result.push_back(impl_->batch_old[i]==0||impl_->batch_old[i]==mark(idx));
+  }
+  impl_->pending_batch=0;
+  return result;
 }
 void serve_rdma_paxos(uint16_t port,const RdmaPaxosOptions& o){
   Server server(o);int fd=listen_tcp(port);

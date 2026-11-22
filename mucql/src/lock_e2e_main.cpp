@@ -31,7 +31,7 @@ constexpr uint64_t kMagic=0x4d5543514c4c4b33ULL; // MUCQLLK3
 constexpr uint64_t kLock=7;
 constexpr uint64_t kOwnerExtra=2;
 constexpr uint64_t kDataExtra=3;
-constexpr size_t kMaxWorkers=8;
+constexpr size_t kMaxWorkers=64;
 constexpr size_t kMaxPositions=3000; // 4096 RDMA Paxos slots incl PREPARE
 struct NoExpiryClock : Clock {
   Bounds now() const override { return {0,0}; }
@@ -105,7 +105,7 @@ int coordinator(int argc,char**argv){
   auto port=port_of(argv[2]);uint64_t ballot=std::stoull(argv[3]);
   auto count=std::stoull(argv[4]),workers=std::stoull(argv[5]);
   if(!ballot||count<2||count>kMaxPositions||workers<2||workers>kMaxWorkers||workers>count)
-    fail("positions must be 2..3000, workers must be 2..8 and <=positions");
+    fail("positions must be 2..3000, workers must be 2..64 and <=positions");
   auto [release_host,release_port]=endpoint(argv[6]);
   const std::string device=argc>10?argv[10]:"mlx4_0";
   const bool verify=argc>11?std::stoull(argv[11])!=0:true;
@@ -138,9 +138,17 @@ int coordinator(int argc,char**argv){
   Config cfg;cfg.horizon_ns=std::numeric_limits<uint64_t>::max()/2;
   cfg.prepare_batch=count;cfg.prepared_ahead=count;
   Leader leader(journal,clock,cfg);
-  for(uint64_t i=0;i<count;i++){
-    auto t=leader.join(kLock,1+i%workers,1+i);
-    if(t.position!=i)fail("unexpected ticket position");
+  size_t order_batch=1;
+  if(const char* b=getenv("MUCQL_ORDER_BATCH"))order_batch=std::stoull(b);
+  if(order_batch==0||order_batch>32)fail("MUCQL_ORDER_BATCH must be 1..32");
+  for(uint64_t i=0;i<count;){
+    std::vector<std::pair<ClientId,RequestId>> reqs;
+    for(size_t j=0;j<order_batch&&i<count;j++,i++)
+      reqs.emplace_back(1+i%workers,1+i);
+    auto tickets=leader.join_batch(kLock,reqs);
+    if(tickets.size()!=reqs.size())fail("batch JOIN returned wrong count");
+    for(size_t j=0;j<tickets.size();j++)
+      if(tickets[j].position+1!=reqs[j].second)fail("unexpected ticket position");
   }
   auto prepared=leader.prepare(kLock,count);
   if(prepared.size()!=count)fail("failed to commit full prepare batch");
@@ -179,6 +187,7 @@ int coordinator(int argc,char**argv){
     <<" completed="<<completed<<" violations="<<violations
     <<" verified_markers="<<checked<<" ordered_entries="<<journal.snapshot().size()
     <<" probe="<<verify<<" work_ns="<<work_ns
+    <<" order_batch="<<order_batch
     <<" ordering_seconds="<<order_seconds
     <<" handoff_seconds="<<handoff_seconds
     <<" goodput_ops_per_sec="<<completed/handoff_seconds
@@ -192,7 +201,7 @@ int worker(int argc,char**argv){
   auto [host,port]=endpoint(argv[2]);uint64_t index=std::stoull(argv[3]);
   const std::string self_ip=argv[4];const auto listenport=port_of(argv[5]);
   const std::string device=argc>6?argv[6]:"mlx4_0";
-  if(index>=kMaxWorkers)fail("worker index outside 0..7");
+  if(index>=kMaxWorkers)fail("worker index outside 0..63");
   // Process-lifetime listener: the RNIC services handoffs with no worker CPU
   // callback. The listener intentionally survives until process exit.
   auto* inbound=new VerbsReleaseServer(opts(device,4096));

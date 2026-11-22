@@ -1,0 +1,21 @@
+{
+  "device": "mlx4_0",
+  "ib_port": 1,
+  "replicas": [
+    {"id": "mn1", "ip": "10.10.1.1"},
+    {"id": "mn2", "ip": "10.10.1.2"},
+    {"id": "mn3", "ip": "10.10.1.3"}
+  ],
+  "data_mn": {"id": "mn4", "ip": "10.10.1.4"},
+  "clients": [
+    {"id": "cn1", "ip": "10.10.1.5", "workers": 4, "cores": 8},
+    {"id": "cn2", "ip": "10.10.1.6", "workers": 4, "cores": 8}
+  ],
+  "benchmark": {
+    "positions": 2048,
+    "ballot": 4101,
+    "order_batch": 16,
+    "probe": 1,
+    "work_ns": 0
+  }
+}

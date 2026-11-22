@@ -1,6 +1,7 @@
 #include "mucql/core.hpp"
 #include <algorithm>
 #include <limits>
+#include <set>
 
 namespace mucql {
 Record MemoryJournal::commit(Record r) {
@@ -63,6 +64,28 @@ Ticket Leader::join(LockId lock, ClientId client, RequestId request) {
   r=journal_.commit(r);
   replay(r);
   return state_[lock].queue.back();
+}
+std::vector<Ticket> Leader::join_batch(LockId lock,
+    const std::vector<std::pair<ClientId,RequestId>>& requests) {
+  std::lock_guard<std::mutex> g(mu_);
+  if(requests.empty())return {};
+  if(requests.size()>32)throw std::invalid_argument("join batch must be <=32");
+  auto& s=state_[lock];
+  std::set<std::pair<ClientId,RequestId>> seen;
+  std::vector<Record> records;
+  for(const auto& req:requests){
+    if(!req.first || !req.second || s.requests.count(req) || !seen.insert(req).second)
+      throw std::invalid_argument("duplicate or invalid batched client request");
+    Record r{};r.type=Record::Type::Join;r.lock=lock;r.client=req.first;
+    r.request=req.second;r.first=s.queue.size()+records.size();
+    records.push_back(r);
+  }
+  auto committed=journal_.commit_many(std::move(records));
+  for(const auto& record:committed)replay(record);
+  std::vector<Ticket> tickets;
+  for(size_t i=s.queue.size()-committed.size();i<s.queue.size();++i)
+    tickets.push_back(s.queue[i]);
+  return tickets;
 }
 bool Leader::add_overflows(uint64_t a,uint64_t b){
   return a>std::numeric_limits<uint64_t>::max()-b;

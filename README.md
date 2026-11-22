@@ -2,6 +2,10 @@
 
 C++17 utilities for ordered queue entries, one-sided RDMA transport, and repeatable throughput smoke tests.
 
+## Dedicated CN nodes and batched ordering
+
+The Apt launcher accepts a JSON topology with separate replica, memory, and client nodes, and can start multiple independent worker processes on each CN. The ordering fast path supports up to 32 in-flight contiguous log entries per replica. [Dashboard commands](tools/apt/ISOLATED.md). The current lock test remains finite-batch; continuous request admission is not yet implemented.
+
 ## End-to-end exclusive locking
 
 The `mucql_lock_e2e` binary exercises a precommitted FIFO of exclusive lock

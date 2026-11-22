@@ -60,6 +60,10 @@ class Journal {
  public:
   virtual ~Journal() = default;
   virtual Record commit(Record proposal) = 0;
+  virtual std::vector<Record> commit_many(std::vector<Record> proposals) {
+    for(auto& r:proposals)r=commit(r);
+    return proposals;
+  }
   virtual std::vector<Record> snapshot() const = 0;
 };
 class MemoryJournal final : public Journal {
@@ -83,6 +87,10 @@ class Leader {
  public:
   Leader(Journal& journal, const Clock& clock, Config config = {});
   Ticket join(LockId lock, ClientId client, RequestId request);
+  // Efficient FIFO admission with one journal batch. Existing request IDs
+  // must be handled by join(); this method rejects duplicates explicitly.
+  std::vector<Ticket> join_batch(LockId lock,
+      const std::vector<std::pair<ClientId,RequestId>>& requests);
   // Returns tickets *newly* prepared with the same chosen deadline.
   std::vector<Ticket> prepare(LockId lock, size_t max_count);
   std::optional<Ticket> ticket(LockId lock, Position position) const;

@@ -1,0 +1,28 @@
+# Local builds
+build/
+build-*/
+**/build/
+**/build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+*.o
+*.a
+*.so
+__pycache__/
+*.pyc
+
+# Machine-specific configuration, output, and credentials
+hosts.env
+hosts.local.env
+results/
+logs/
+*.log
+*.pem
+*.key
+id_ed25519
+id_rsa
+.env
+.env.*
+!.env.example
+.DS_Store

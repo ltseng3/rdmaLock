@@ -1,0 +1,6 @@
+[host1][core0] GOODPUT_BIN host=1 core=0 start_ns=1000000000 end_ns=1010000000 completed=10
+[host1][core0] GOODPUT_BIN host=1 core=0 start_ns=1010000000 end_ns=1020000000 completed=20
+[host1][core0] GOODPUT_BIN host=1 core=0 start_ns=1020000000 end_ns=1030000000 completed=30
+[host2][core0] GOODPUT_BIN host=2 core=0 start_ns=1005000000 end_ns=1015000000 completed=40
+[host2][core0] GOODPUT_BIN host=2 core=0 start_ns=1015000000 end_ns=1025000000 completed=50
+[host2][core0] GOODPUT_BIN host=2 core=0 start_ns=1025000000 end_ns=1035000000 completed=60

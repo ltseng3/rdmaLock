@@ -1,0 +1,43 @@
+{
+  "seed": 2026,
+  "shuffle": true,
+  "tests": [
+    {
+      "name": "transport-and-window-diagnostic",
+      "kind": "live_e2e",
+      "profiles": [
+        "raw",
+        "lookahead",
+        "replenish_control",
+        "replenish_proactive",
+        "full_no_join",
+        "full_no_phase2",
+        "full"
+      ],
+      "cn_counts": [
+        2
+      ],
+      "workers_per_cn": [
+        1,
+        4
+      ],
+      "locks": [
+        1
+      ],
+      "distributions": [
+        "uniform"
+      ],
+      "probes": [
+        0
+      ],
+      "work_ns": [
+        0
+      ],
+      "warmup_ms": 200,
+      "measure_ms": 1000,
+      "paxos_slots": 131072,
+      "max_ops": 90000,
+      "repetitions": 2
+    }
+  ]
+}

@@ -48,6 +48,38 @@ protected data operations, and client handoffs use RDMA. TCP admission and the
 leader's release-marker RDMA READ are part of the measured cost. Never describe
 this as a pure one-sided CN admission path or subtract these costs.
 
+## Focused transport and preparation diagnostic (before the 320-case suite)
+
+The live CN/coordinator control sockets now set `TCP_NODELAY` on both ends.
+This is a **common admission transport correction** (not a MuCQL algorithmic
+optimization). Earlier runs may have suffered Nagle/delayed-ACK latency and
+must not be merged with post-fix results as though the transport were unchanged.
+
+Run the following **28-trial diagnostic suite** before attempting the full sweep:
+
+```bash
+cd ~/rdmaLock && git pull --ff-only
+python3 tools/apt/run_suite.py --suite tools/apt/suites/live_diagnostic.json --fail-fast
+```
+
+It executes paired two-worker and eight-worker cases with two repetitions
+per profile: raw, lookahead, reactive/proactive replenishment, full without JOIN
+aggregation, full without RNIC phase-2 pipelining, and full. All cases use
+one hot lock, a 200 ms warmup, a 1,000 ms measurement, and a fixed
+131,072-slot log; the maximum 90,000 JOINs is an **upper bound**, not a
+throughput target. If the rate exceeds the finite log, the test fails rather
+than reporting a truncated rate. The roughly 16-MiB accepted-log allocation
+per replica is substantially smaller than the 1,000,000-slot full sweep,
+but still needs RNIC registration. These diagnostic durations and two
+repetitions are for debugging and attribution hypotheses, **not**
+publication-quality confidence intervals.
+
+With `--fail-fast`, the first rejected trial stops the matrix, writes
+`failure.txt`, retains the per-node logs, and includes `error` plus the
+full intended configuration in `runs.csv`. In a clean run, use
+`summary.csv` and `ablations.csv` to compare matched variants. Do not
+start the 320-trial sweep if any diagnostic case fails.
+
 ## Named optimization profiles
 
 Each profile resolves to an immutable set of six knobs in

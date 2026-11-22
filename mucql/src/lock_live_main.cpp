@@ -24,6 +24,7 @@
 #include <mutex>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <optional>
 #include <random>
 #include <set>
@@ -76,6 +77,20 @@ void recv_exact(int fd,void* p,size_t n){auto b=static_cast<char*>(p);
   while(n){auto k=::recv(fd,b,n,0);if(k<0&&errno==EINTR)continue;
     if(k<=0)fail("recv disconnected");
     n-=size_t(k);b+=k;}}
+// Avoid Nagle/delayed-ACK stalls on small CN admission/control frames.
+// This identical transport configuration applies to raw and full MuCQL.
+void tcp_no_delay(int fd){
+  const int one=1;
+  if(setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&one,sizeof(one))!=0)
+    fail(std::string("TCP_NODELAY: ")+std::strerror(errno));
+}
+int accept_tcp(int listener){
+  int fd;
+  do{fd=::accept(listener,nullptr,nullptr);}while(fd<0&&errno==EINTR);
+  if(fd<0)fail(std::string("accept CN: ")+std::strerror(errno));
+  tcp_no_delay(fd);
+  return fd;
+}
 int listen_tcp(uint16_t port){int fd=socket(AF_INET,SOCK_STREAM,0);if(fd<0)fail("socket");
   int opt=1;setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,&opt,sizeof(opt));
   sockaddr_in a{};a.sin_family=AF_INET;a.sin_port=htons(port);a.sin_addr.s_addr=INADDR_ANY;
@@ -86,7 +101,7 @@ int connect_tcp(const std::string& host,uint16_t port){addrinfo hints{};hints.ai
   if(getaddrinfo(host.c_str(),p.c_str(),&hints,&ai))fail("resolve "+host);
   int fd=-1;for(auto* a=ai;a;a=a->ai_next){int f=socket(a->ai_family,a->ai_socktype,a->ai_protocol);
     if(f<0)continue;
-    if(::connect(f,a->ai_addr,a->ai_addrlen)==0){fd=f;break;}
+    if(::connect(f,a->ai_addr,a->ai_addrlen)==0){tcp_no_delay(f);fd=f;break;}
     close(f);}
   freeaddrinfo(ai);if(fd<0)fail("TCP connect "+host+":"+p);return fd;}
 ReleaseEndpointOptions release_opts(const std::string& dev,uint64_t slots){ReleaseEndpointOptions o;
@@ -149,7 +164,7 @@ int coordinator(int argc,char**argv){
            <<" locks="<<o.lock_count<<" max_ops="<<o.max_ops<<std::endl;
   std::vector<int> sockets(o.workers,-1);std::vector<Peer> peers(o.workers);
   for(size_t n=0;n<o.workers;n++){
-    int fd=accept(listenfd,nullptr,nullptr);if(fd<0)fail("accept CN");
+    int fd=accept_tcp(listenfd);
     Hello h{};recv_exact(fd,&h,sizeof(h));
     if(h.magic!=kMagic||h.index>=o.workers||sockets[h.index]!=-1||h.port<1024||h.port>65535||host_of(h.ip).empty())
       fail("duplicate/invalid worker HELLO");

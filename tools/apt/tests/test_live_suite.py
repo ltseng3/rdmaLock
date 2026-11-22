@@ -104,6 +104,33 @@ class LiveSuiteTests(unittest.TestCase):
         doc['benchmark']['replenish_threshold']=70
         with self.assertRaises(ValueError):cluster.validate(doc)
 
+    def test_diagnostic_suite_matrix_and_matched_pairs(self):
+        spec=json.loads((HERE/'suites/live_diagnostic.json').read_text())
+        cases=runner.expand_suite(spec,TOPO)
+        self.assertEqual(len(cases),28)
+        self.assertEqual({c['cn_count']*c['workers_per_cn'] for c in cases},{2,8})
+        self.assertEqual({c['profile'] for c in cases},{
+            'raw','lookahead','replenish_control','replenish_proactive',
+            'full_no_join','full_no_phase2','full'})
+        self.assertTrue(all(c['paxos_slots']==131072 and c['max_ops']==90000 for c in cases))
+        for workers in (2,8):
+            peers=[c for c in cases if c['cn_count']*c['workers_per_cn']==workers]
+            self.assertEqual({(c['profile'],c['trial']) for c in peers},
+                             {(p,i) for p in {
+                                 'raw','lookahead','replenish_control','replenish_proactive',
+                                 'full_no_join','full_no_phase2','full'} for i in (1,2)})
+
+    def test_failed_row_records_diagnostics_and_full_live_profile(self):
+        c=runner.expand_suite({'tests':[BASE]},TOPO)[0]
+        row=runner.failure_row(c,'a'*40,RuntimeError('RDMA registration failed'))
+        self.assertEqual(row['status'],'FAIL')
+        self.assertEqual(row['worker_processes'],2)
+        self.assertEqual(row['cn_nodes'],2)
+        self.assertEqual(row['paxos_slots'],16384)
+        self.assertEqual(row['join_aggregate'],1)
+        self.assertIn('RDMA registration failed',row['error'])
+        self.assertIn('error',runner.COLUMNS)
+
     def test_run_matrix_bounds(self):
         spec=json.loads((HERE/'suites/live_ablations.json').read_text())
         cases=runner.expand_suite(spec,TOPO)

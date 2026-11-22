@@ -6,6 +6,20 @@ using namespace mucql_live;
 int main(int argc,char**argv){
   std::signal(SIGALRM,[](int){std::_Exit(22);});alarm(35);
   try{
+    // Real TCP loopback test for both sides of the admission transport.
+    // The remaining integration test exercises the same code with mock RNICs.
+    int listenfd=listen_tcp(0);
+    sockaddr_in addr{};socklen_t len=sizeof(addr);
+    if(getsockname(listenfd,reinterpret_cast<sockaddr*>(&addr),&len)!=0)
+      fail("getsockname admission TCP");
+    int clientfd=connect_tcp("127.0.0.1",ntohs(addr.sin_port));
+    int serverfd=accept_tcp(listenfd);
+    for(int fd:{clientfd,serverfd}){
+      int val=0;socklen_t optlen=sizeof(val);
+      if(getsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&val,&optlen)!=0||val!=1)
+        fail("CN admission TCP_NODELAY missing");
+    }
+    close(serverfd);close(clientfd);close(listenfd);
     uint64_t workers=argc>1?std::stoull(argv[1]):3;
     uint64_t locks=argc>2?std::stoull(argv[2]):1;
     uint64_t join=argc>3?std::stoull(argv[3]):1;

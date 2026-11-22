@@ -46,7 +46,7 @@ COLUMNS = ['case', 'scenario', 'trial', 'kind', 'measurement_scope', 'comparable
            'paxos_slots', 'max_ops', 'join_aggregate', 'phase2_window', 'prepare_range',
            'lookahead', 'replenish_threshold', 'batch_wait_us', 'measured', 'join_batches',
            'actual_join_batch_mean', 'prepare_records', 'latency_p50_ns', 'latency_p95_ns',
-           'latency_p99_ns', 'admission_p50_ns', 'admission_p99_ns', 'handoff_wait_p99_ns']
+           'latency_p99_ns', 'admission_p50_ns', 'admission_p99_ns', 'handoff_wait_p99_ns', 'error']
 
 
 def require_int(value, lo, hi, name):
@@ -498,6 +498,26 @@ def write_ablations(rows, path):
 
 
 
+def failure_row(case, commit, exc):
+    """Preserve the requested configuration and exception for rejected trials."""
+    row={key:'' for key in COLUMNS}
+    row.update(case=case['id'],scenario=case['name'],trial=case['trial'],
+               kind=case['kind'],measurement_scope='failed',
+               comparable_to_declock='NO',commit=commit,
+               cn_nodes=case['cn_count'],
+               worker_processes=case['cn_count']*case['workers_per_cn'],
+               positions=case['positions'],batch=case['batch'],
+               probe=case['probe'],work_ns=case['work_ns'],status='FAIL',
+               error=str(exc).replace('\n',' | ')[:2000])
+    if case['kind']=='live_e2e':
+        row.update(profile=case['profile'],lock_count=case['locks'],
+                   distribution=case['distribution'],warmup_ms=case['warmup_ms'],
+                   measure_ms=case['measure_ms'],seed=case['seed'],
+                   paxos_slots=case['paxos_slots'],max_ops=case['max_ops'],
+                   **profile(case['profile']))
+    return row
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--topology', type=Path, default=(HERE/'topology.local.json' if (HERE/'topology.local.json').exists() else HERE/'topology.json'))
@@ -511,6 +531,7 @@ def main():
     deps.add_argument('--install-deps', action='store_true', help='force full Apt/RDMA tools setup on nodes (passwordless sudo)')
     deps.add_argument('--no-auto-deps', action='store_true', help='check prerequisites only; never install packages')
     ap.add_argument('--max-cases', type=int, default=0)
+    ap.add_argument('--fail-fast', action='store_true', help='stop at first failed trial; retain collected logs and CSV')
     args = ap.parse_args()
     topo, _ = cluster.read(args.topology)
     cases = expand_suite(json.loads(args.suite.read_text()), topo)
@@ -576,20 +597,17 @@ def main():
                               topo['benchmark']['ballot']+idx+1,args.timeout)
                 print('  PASS:',row['goodput_ops_per_sec'] or row['ordered_entries_per_sec'],'ops/s',flush=True)
             except Exception as exc:
-                row={k:'' for k in COLUMNS}
-                row.update(case=case['id'],scenario=case['name'],trial=case['trial'],kind=case['kind'],
-                           measurement_scope='failed',comparable_to_declock='NO',commit=sha,
-                           positions=case['positions'],batch=case['batch'],status='FAIL',
-                           profile=case.get('profile',''),lock_count=case.get('locks',''),
-                           distribution=case.get('distribution',''),work_ns=case.get('work_ns',''),
-                           probe=case.get('probe',''),warmup_ms=case.get('warmup_ms',''),
-                           measure_ms=case.get('measure_ms',''),seed=case.get('seed',''))
+                row=failure_row(case,sha,exc)
                 (root/case['id']/'failure.txt').parent.mkdir(parents=True,exist_ok=True)
                 (root/case['id']/'failure.txt').write_text(repr(exc)+'\n')
                 print('  FAILED:',exc,flush=True)
             rows.append(row)
             writer.writerow(row)
             f.flush()
+            if args.fail_fast and row['status']!='PASS':
+                print('Stopping after first failure (--fail-fast). '
+                      'Inspect the case failure.txt and node logs before a larger sweep.', flush=True)
+                break
     summarize(rows,root/'summary.csv')
     write_ablations(rows,root/'ablations.csv')
     print('\nRaw logs:',root, '\nRun records:',summary_csv,'\nGrouped medians:',root/'summary.csv',

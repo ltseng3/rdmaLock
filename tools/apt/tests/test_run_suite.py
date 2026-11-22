@@ -80,6 +80,38 @@ class SuiteTests(unittest.TestCase):
             self.assertEqual(s['returncode'],0)
             self.assertFalse(s['alive'])
 
+    def test_bootstrap_orders_dependency_check_before_cmake_build(self):
+        ex=auto.Executor(username='tester',checkout=Path('/tmp'),local_ips=set())
+        calls=[]
+        ex.shell=lambda node, script, **kw: (calls.append((script,kw)) or 'OK')
+        self.assertEqual(ex.bootstrap({'id':'cn1','ip':'10.10.1.5'}, 'a'*40, 'mlx4_0', 1), 'OK')
+        script, opts = calls[0]
+        self.assertLess(script.index('git clone'), script.index('ensure_deps.sh auto'))
+        self.assertLess(script.index('ensure_deps.sh auto'), script.index('tools/apt/build.sh'))
+        self.assertLess(script.index('tools/apt/build.sh'), script.index('tools/apt/check.sh'))
+        self.assertEqual(opts['timeout'], 900)
+
+    def test_bootstrap_explicit_check_only_never_installs(self):
+        ex=auto.Executor(username='tester',checkout=Path('/tmp'),local_ips=set())
+        calls=[]
+        ex.shell=lambda node, script, **kw: (calls.append((script,kw)) or 'OK')
+        ex.bootstrap({'id':'cn1','ip':'10.10.1.5'}, 'a'*40, 'mlx4_0', 1,
+                     auto_deps=False)
+        script, opts = calls[0]
+        self.assertIn('tools/apt/ensure_deps.sh check', script)
+        self.assertNotIn('setup.sh', script)
+        self.assertEqual(opts['timeout'], 360)
+
+    def test_bootstrap_full_setup_still_checks_dependencies(self):
+        ex=auto.Executor(username='tester',checkout=Path('/tmp'),local_ips=set())
+        calls=[]
+        ex.shell=lambda node, script, **kw: (calls.append((script,kw)) or 'OK')
+        ex.bootstrap({'id':'cn1','ip':'10.10.1.5'}, 'a'*40, 'mlx4_0', 1,
+                     install_deps=True)
+        script, _ = calls[0]
+        self.assertLess(script.index('tools/apt/setup.sh'), script.index('ensure_deps.sh auto'))
+        self.assertLess(script.index('ensure_deps.sh auto'), script.index('tools/apt/build.sh'))
+
     def test_controller_ssh_exec_is_noninteractive(self):
         ex=auto.Executor(username='tsengle',checkout=Path('/tmp'),local_ips=set())
         self.assertEqual(ex.is_local({'ip':'10.10.1.1'}),False)

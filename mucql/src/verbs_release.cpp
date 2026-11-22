@@ -128,18 +128,39 @@ int connect_tcp(const std::string& host,uint16_t port){
   freeaddrinfo(ai);if(fd<0)fail("TCP connect "+host);return fd;
 }
 int listen_tcp(uint16_t port){
-  int fd=socket(AF_INET,SOCK_STREAM,0);if(fd<0)fail("socket");
-  int yes=1;setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof(yes));
-  sockaddr_in addr{};addr.sin_family=AF_INET;addr.sin_port=htons(port);addr.sin_addr.s_addr=INADDR_ANY;
-  if(bind(fd,reinterpret_cast<sockaddr*>(&addr),sizeof(addr))!=0){
-    const int error=errno;::close(fd);
-    fail("TCP bind "+std::to_string(port)+": "+std::strerror(error));
+  // This listener is restarted once per benchmark case. A previous RNIC
+  // server may be releasing its TCP bootstrap socket as the next case starts.
+  // Retry only EADDRINUSE; every other socket error fails immediately.
+  // An unrelated listener is NEVER terminated and a permanent collision
+  // remains a hard failure rather than silently invalidating the trial.
+  const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(4);
+  unsigned attempt=0;
+  for(;;){
+    ++attempt;
+    int fd=socket(AF_INET,SOCK_STREAM,0);
+    if(fd<0)fail("TCP socket: "+std::string(std::strerror(errno)));
+    const int yes=1;
+    if(setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof(yes))!=0){
+      const int error=errno;::close(fd);
+      fail("TCP SO_REUSEADDR: "+std::string(std::strerror(error)));
+    }
+    sockaddr_in addr{};addr.sin_family=AF_INET;addr.sin_port=htons(port);
+    addr.sin_addr.s_addr=INADDR_ANY;
+    int error=0;bool bound=false;
+    if(bind(fd,reinterpret_cast<sockaddr*>(&addr),sizeof(addr))!=0)
+      error=errno;
+    else if(listen(fd,32)!=0){error=errno;bound=true;}
+    else return fd;
+    ::close(fd);
+    const auto op=bound?"listen":"bind";
+    if(error!=EADDRINUSE||std::chrono::steady_clock::now()>=deadline)
+      fail("TCP "+std::string(op)+" "+std::to_string(port)+": "+
+           std::strerror(error)+" (attempts="+std::to_string(attempt)+")");
+    if(attempt==1)
+      std::cerr<<"RDMA release bootstrap port "<<port
+               <<" is in use; retrying for at most 4 seconds"<<std::endl;
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
   }
-  if(listen(fd,32)!=0){
-    const int error=errno;::close(fd);
-    fail("TCP listen "+std::to_string(port)+": "+std::strerror(error));
-  }
-  return fd;
 }
 }
 struct VerbsReleaseServer::Impl {

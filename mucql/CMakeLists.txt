@@ -137,4 +137,9 @@ set_tests_properties(mucql_live_hot_raw mucql_live_hot_optimized
       mucql_live_rdma_many_data_writes_skew_mock
       PROPERTIES ENVIRONMENT "MUCQL_CN_TRANSPORT=rdma;MUCQL_DATA_OPS=32"
                  TIMEOUT 45 RUN_SERIAL TRUE)
+  add_test(NAME mucql_live_rdma_release_bind_retry_mock
+      COMMAND mucql_live_mock_test 4 1 1 1 1 2 0 1)
+  set_tests_properties(mucql_live_rdma_release_bind_retry_mock
+      PROPERTIES ENVIRONMENT "MUCQL_CN_TRANSPORT=rdma;MUCQL_TEST_RELEASE_BIND_DELAY_MS=60"
+                 TIMEOUT 45 RUN_SERIAL TRUE)
 endif()

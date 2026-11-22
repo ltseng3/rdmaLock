@@ -143,7 +143,20 @@ def main():
         print(json.dumps({'started': True, 'pid': proc.pid, 'role': args.role}))
         return 0
     if args.action == 'status':
-        print(json.dumps(snapshot(path)))
+        state = snapshot(path)
+        if (state['finished'] and state['returncode'] not in (None,0)
+                and ('Address already in use' in state['log_tail']
+                     or 'TCP bind/listen' in state['log_tail'])):
+            # Startup may race port shutdown after the initial preflight.
+            # Preserve the original bind failure while showing the current
+            # TCP socket owner/state. Diagnostic only: never kill by port.
+            doc, _ = cluster.read(args.config)
+            ports = lifecycle.role_ports(doc,args.role,cluster)
+            if ports:
+                state['log_tail'] = (
+                    state['log_tail'][-1300:] + '\nTCP_DIAGNOSTIC: ' +
+                    lifecycle.describe_ports(ports)[:400])
+        print(json.dumps(state))
         return 0
     if args.action == 'stop':
         doc, _ = cluster.read(args.config)

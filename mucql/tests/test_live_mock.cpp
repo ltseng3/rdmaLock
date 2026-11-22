@@ -36,6 +36,25 @@ int main(int argc,char**argv){
     // Fast CI hosts can execute >2,900 simulated operations in 170 ms.
     constexpr uint64_t kTestSlots=131072, kTestMaxOps=90000;
     if(setenv("MUCQL_PAXOS_SLOTS", "131072", 1)!=0)fail("setenv mock slots");
+    // Reproduce the previously observed transient EADDRINUSE on the MN4
+    // bootstrap port before starting the release server. The old socket is
+    // intentionally external to the server and is released shortly after.
+    if(const char* value=std::getenv("MUCQL_TEST_RELEASE_BIND_DELAY_MS")){
+      const auto delay=number(value,1,80,"mock bind delay");
+      int busy=::socket(AF_INET,SOCK_STREAM,0);
+      if(busy<0)fail("mock collision socket");
+      const int yes=1;
+      if(::setsockopt(busy,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof(yes))!=0)
+        fail("mock collision SO_REUSEADDR");
+      sockaddr_in local{};local.sin_family=AF_INET;local.sin_port=htons(uint16_t(base+20));
+      local.sin_addr.s_addr=INADDR_ANY;
+      if(::bind(busy,reinterpret_cast<sockaddr*>(&local),sizeof(local))!=0||
+         ::listen(busy,1)!=0)fail("mock collision setup failed");
+      std::thread([busy,delay]{
+        std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+        ::close(busy);
+      }).detach();
+    }
     auto* region=new VerbsReleaseServer(release_opts("mock0",kTestSlots+2*locks+32));
     std::thread([region,base]{try{region->listen_forever(uint16_t(base+20));}
       catch(const std::exception& e){std::cerr<<"mock data server: "<<e.what()<<std::endl;std::_Exit(24);}}).detach();

@@ -7,6 +7,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 
@@ -41,6 +42,43 @@ class LifecycleTests(unittest.TestCase):
         finally:
             s.close()
         life.wait_ports_free([port],timeout=1)
+
+    def test_bind_probe_catches_port_occupied_without_listen(self):
+        # /proc/net/tcp has no LISTEN entry for this socket, but a new
+        # wildcard server cannot bind. This is precisely what the old
+        # LISTEN-only teardown check incorrectly accepted.
+        s=socket.socket()
+        s.bind(('0.0.0.0',0))
+        port=s.getsockname()[1]
+        try:
+            self.assertNotIn(port,life.listeners())
+            self.assertFalse(life.can_bind_and_listen(port))
+            with self.assertRaisesRegex(RuntimeError,'bind/listen port'):
+                life.wait_ports_free([port],timeout=.03)
+        finally:
+            s.close()
+        self.assertTrue(life.can_bind_and_listen(port))
+        life.wait_ports_free([port],timeout=1)
+
+    def test_retry_probe_waits_for_stopping_socket(self):
+        s=socket.socket()
+        s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+        s.bind(('0.0.0.0',0))
+        port=s.getsockname()[1]
+        s.listen(1)
+        thread=threading.Thread(target=lambda:(time.sleep(.12),s.close()))
+        thread.start()
+        try:
+            self.assertFalse(life.can_bind_and_listen(port))
+            life.wait_ports_free([port],timeout=2)
+        finally:
+            thread.join(timeout=1)
+            s.close()
+
+    def test_port_probe_rejects_invalid_ports(self):
+        for port in (0,-1,65536,1.5,'39670',None):
+            with self.assertRaises(ValueError):
+                life.can_bind_and_listen(port)
 
     def test_24_repeated_restart_cycles_release_listener(self):
         with tempfile.TemporaryDirectory() as d:

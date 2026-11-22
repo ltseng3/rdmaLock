@@ -116,6 +116,42 @@ its logs and do not interpret TCP results as proof that the RDMA path works.
 The test mock models registered buffer ownership and CQ completions but
 **cannot validate real mlx4 RNR, CQ ordering, MR registration, or RNIC timing**.
 
+## Intermittent release-server TCP port collisions
+
+If a smoke trial fails with
+`ibverbs release: TCP bind 39670: Address already in use`, the release
+server on MN4 never started and that trial **did not measure MuCQL**.
+It is not an RDMA CAS/consensus safety failure. Previous successful trial
+rows can still be inspected, but a multi-repetition result is incomplete.
+
+Lifecycle checks now verify whether the next server can **actually bind and
+listen** on the configured wildcard TCP port, rather than merely requiring
+that a `LISTEN` line disappear from `/proc/net/tcp`. The release-server
+bootstrap bind also retries only transient `EADDRINUSE` for at most four
+seconds; a persistent conflict is a hard error. Failed startup reports
+include `TCP_DIAGNOSTIC` from all TCP socket states (when `ss` exists).
+No process is killed by port number or command name. A job only stops its
+own tagged process group.
+
+On **MN4**, inspect an unresolved collision **without killing anything**:
+
+```bash
+sudo ss -tanp | grep ':39670' || true
+pgrep -af mucql_verbs_release || true
+```
+
+Inspect the owner and `results/automation/<session>/<failed-case>/mn4/stdout.log`
+and `failure.txt` before deciding whether an orphaned prior-run process
+needs manual intervention. Do not run multiple controllers concurrently or
+run DecLock at the same time. If no owner appears, the conflict may have
+been transient; a missing socket after the failure does not establish its
+original cause.
+
+After updating all nodes to the patched commit, **rerun the 24-case
+`live_declock_hot_smoke.json` with `--fail-fast`**. Run the 60-case
+`live_declock_hot_match.json` only after every smoke trial passes. Do not
+combine incomplete pairs with a new commit's results.
+
 ## DecLock-style exclusive critical-section comparison
 
 The live worker now supports **\`data_ops\` = 1..32**, exactly that many

@@ -5,6 +5,8 @@ marker; no port-based killing or wildcard pkill is permitted.
 """
 from __future__ import annotations
 import os
+import errno
+import socket
 from pathlib import Path
 import signal
 import subprocess
@@ -30,29 +32,62 @@ def listeners():
 
 
 def describe_ports(ports):
-    """Diagnostic only; ss is not required for any correctness check."""
+    """Best-effort TCP socket diagnostics for a failed bind/listen attempt.
+
+    Include all TCP states: a LISTEN-only check can miss bound or closing
+    sockets that still block another server's wildcard bind.
+    """
     try:
-        r = subprocess.run(['ss', '-ltnp'], capture_output=True, text=True,
+        r = subprocess.run(['ss', '-tanp'], capture_output=True, text=True,
                            timeout=3, check=False)
         lines = [s for s in r.stdout.splitlines()
-                 if any(f':{p} ' in s or s.rstrip().endswith(f':{p}') for p in ports)]
-        return '; '.join(lines)[:1200] if lines else 'ss did not identify a listener PID'
+                 if any(f':{p} ' in s or s.rstrip().endswith(f':{p}')
+                        for p in ports)]
+        return '; '.join(lines)[:1200] if lines else (
+            'ss found no current TCP socket on the port; '
+            'the collision may have been transient')
     except (FileNotFoundError, subprocess.TimeoutExpired):
-        return 'run ss -ltnp on the affected host to identify the listener'
+        return 'run ss -tanp on the affected host to identify conflicting sockets'
+
+
+def can_bind_and_listen(port):
+    """Test the actual C++ server bind contract (AF_INET/ANY + REUSEADDR).
+
+    LISTEN enumeration alone cannot prove bindability, and a successful bind
+    alone does not prove that listen() can succeed. This probe owns the socket
+    only while both operations are checked. No other listener is terminated.
+    """
+    if type(port) is not int or not 1024 <= port <= 65535:
+        raise ValueError('TCP port out of range')
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind(('0.0.0.0', port))
+            s.listen(1)
+        except OSError as exc:
+            if exc.errno == errno.EADDRINUSE:
+                return False
+            raise
+    return True
 
 
 def wait_ports_free(ports, timeout=4.0):
+    """Wait until a new release/ordering/coordinator TCP server can bind.
+
+    Do not confuse a disappeared LISTEN entry with a usable port; the actual
+    bind/listen probe catches additional conflicting TCP socket states.
+    """
     ports = set(ports)
     if not ports:
         return
     deadline = time.monotonic() + timeout
     while True:
-        busy = ports & listeners()
+        busy = {port for port in ports if not can_bind_and_listen(port)}
         if not busy:
             return
         if time.monotonic() >= deadline:
             values = ', '.join(str(x) for x in sorted(busy))
-            raise RuntimeError(f'TCP LISTEN port(s) still occupied: {values}; '
+            raise RuntimeError(f'TCP bind/listen port(s) still occupied: {values}; '
                                f'{describe_ports(busy)}. '
                                'Refusing to terminate an unowned listener.')
         time.sleep(0.05)

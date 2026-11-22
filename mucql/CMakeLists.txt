@@ -111,6 +111,12 @@ if(MUCQL_MOCK_VERBS_TEST)
   add_test(NAME mucql_rdma_quorum_mock COMMAND mucql_paxos_rdma_mock_test)
 endif()
 
+# Dedicated frame, receive-ring wraparound and cancellation regression.
+add_executable(mucql_live_control_mock_test tests/test_live_control_mock.cpp)
+target_link_libraries(mucql_live_control_mock_test PRIVATE mucql_mock_verbs Threads::Threads)
+target_compile_options(mucql_live_control_mock_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME mucql_live_control_recv_recycle COMMAND mucql_live_control_mock_test)
+
 # Both software-MR variants execute the same live control channel.
 add_test(NAME mucql_live_rdma_hot_mock COMMAND mucql_live_mock_test 4 1 8 8 8 16 0 1)
 add_test(NAME mucql_live_rdma_16clients_mock COMMAND mucql_live_mock_test 16 1 16 16 16 64 0 1)

@@ -1,0 +1,99 @@
+{
+  "seed": 2026,
+  "shuffle": true,
+  "tests": [
+    {
+      "name": "keys-single-smoke",
+      "kind": "live_e2e",
+      "profiles": [
+        "raw"
+      ],
+      "transports": [
+        "rdma"
+      ],
+      "cn_counts": [
+        2
+      ],
+      "data_ops": [
+        1
+      ],
+      "work_ns": [
+        0
+      ],
+      "paxos_slots": 131072,
+      "max_ops": 90000,
+      "rx_idle_us": [
+        0
+      ],
+      "handoff_idle_us": [
+        0
+      ],
+      "handoff_preconnect": [
+        0
+      ],
+      "workers_per_cn": [
+        4
+      ],
+      "locks": [
+        1
+      ],
+      "distributions": [
+        "uniform"
+      ],
+      "probes": [
+        1
+      ],
+      "warmup_ms": 100,
+      "measure_ms": 500,
+      "repetitions": 2
+    },
+    {
+      "name": "keys-multikey-smoke",
+      "kind": "live_e2e",
+      "profiles": [
+        "raw"
+      ],
+      "transports": [
+        "rdma"
+      ],
+      "cn_counts": [
+        2
+      ],
+      "data_ops": [
+        1
+      ],
+      "work_ns": [
+        0
+      ],
+      "paxos_slots": 131072,
+      "max_ops": 90000,
+      "rx_idle_us": [
+        0
+      ],
+      "handoff_idle_us": [
+        0
+      ],
+      "handoff_preconnect": [
+        0
+      ],
+      "workers_per_cn": [
+        4
+      ],
+      "locks": [
+        16,
+        256,
+        4096
+      ],
+      "distributions": [
+        "uniform",
+        "zipf_0.99"
+      ],
+      "probes": [
+        1
+      ],
+      "warmup_ms": 100,
+      "measure_ms": 500,
+      "repetitions": 2
+    }
+  ]
+}

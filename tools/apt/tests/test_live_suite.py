@@ -224,6 +224,48 @@ class LiveSuiteTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     runner.expand_suite({'tests':[dict(BASE,**{knob:[bad]})]},TOPO)
 
+    def test_lock_count_sweep_varies_only_keyspace_and_distribution(self):
+        suites=[
+            ('live_key_scaling_smoke.json',14,4,1,500),
+            ('live_key_scaling_8.json',39,4,0,1000),
+            ('live_key_scaling_16.json',39,8,0,1000),
+        ]
+        for filename,count,wpc,probe,measure in suites:
+            with self.subTest(suite=filename):
+                spec=json.loads((HERE/'suites'/filename).read_text())
+                cases=runner.expand_suite(spec,TOPO)
+                self.assertEqual(len(cases),count)
+                self.assertEqual(len({c['id'] for c in cases}),count)
+                self.assertEqual({c['workers_per_cn'] for c in cases},{wpc})
+                self.assertEqual({c['probe'] for c in cases},{probe})
+                self.assertEqual({c['measure_ms'] for c in cases},{measure})
+                self.assertEqual({c['profile'] for c in cases},{'raw'})
+                self.assertEqual({c['transport'] for c in cases},{'rdma'})
+                self.assertEqual({c['data_ops'] for c in cases},{1})
+                self.assertEqual({c['work_ns'] for c in cases},{0})
+                self.assertEqual({c['rx_idle_us'] for c in cases},{0})
+                self.assertEqual({c['handoff_idle_us'] for c in cases},{0})
+                # Preconnect=0 reproduces the previously measured raw hot path.
+                # Avoid measuring new optimization knobs before the key sweep.
+                self.assertEqual({c['handoff_preconnect'] for c in cases},{0})
+                self.assertEqual({c['paxos_slots'] for c in cases},{131072})
+                self.assertEqual({c['max_ops'] for c in cases},{90000})
+                keys={(c['locks'],c['distribution']) for c in cases}
+                self.assertIn((1,'uniform'),keys)
+                self.assertNotIn((1,'zipf_0.99'),keys)
+                self.assertIn((4096,'uniform'),keys)
+                self.assertIn((4096,'zipf_0.99'),keys)
+                if measure==1000:
+                    self.assertEqual({x for x,_ in keys},{1,4,16,64,256,1000,4096})
+                else:
+                    self.assertEqual({x for x,_ in keys},{1,16,256,4096})
+                for c in cases:
+                    cfg=runner.case_topology(TOPO,c,4101)
+                    self.assertEqual(cfg['benchmark']['locks'],c['locks'])
+                    self.assertEqual(cfg['benchmark']['zipf'],int(c['distribution']=='zipf_0.99'))
+                    self.assertEqual(cfg['benchmark']['data_ops'],1)
+                    self.assertEqual(cluster.validate(cfg),2*wpc)
+
     def test_poll_policy_does_not_merge_unmatched_throughput(self):
         rows=[]
         for rx in (0,5):

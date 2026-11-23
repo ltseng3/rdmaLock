@@ -190,6 +190,84 @@ grep -R -E 'accepted MR registration|RDMA acceptor session|RDMA Paxos provisioni
     mn1 mn2 mn3
 \`\`\`
 
+## Key-count scaling BEFORE tuning
+
+**Run this before the new idle-poll / early-connection tuning suites.**
+The one-key, all-exclusive workload is a useful stress test, but its
+serialized ownership transfer does not characterize multi-key scalability.
+The live benchmark already supports 1–4096 distinct lock IDs, deterministic
+uniform keys, and Zipf(alpha=0.99) keys. It does **not** support the paper's
+100,000-key default without a separate scalability redesign.
+
+This experiment changes **only the number of keys and the distribution**.
+To avoid an optimization confound, it holds the baseline at raw, RDMA
+control, one completed 8-byte RDMA data WRITE, 0% reads, no CPU busy-work,
+no idle polling sleeps, and **handoff_preconnect=0** (the legacy raw path).
+It uses 3 Paxos replicas plus the data MN. Each result retains release
+marker checking, and the smoke trials additionally probe exclusive owners.
+
+For reproducibility, all cases fix Paxos slots to 131072 and max_ops to
+90000 (the previously hardware-tested 16 MiB-per-replica registration).
+These logs are nonrecycling; if a case exceeds the fixed operation/log
+budget, it must FAIL and be reported, not silently truncate its elapsed time.
+
+### Stage 1: 14 safety smoke trials (8 total workers)
+
+On the experiment controller (Node 4):
+
+~~~bash
+cd ~/rdmaLock && git pull --ff-only
+python3 tools/apt/run_suite.py \
+  --suite tools/apt/suites/live_key_scaling_smoke.json --fail-fast
+~~~
+
+These trials cover one lock and 16/256/4096 keys (both uniform and Zipf
+on multi-key populations) with two repetitions, 100 ms warmup, 500 ms
+measurement and ownership probes enabled. Before a larger sweep, verify
+all trials PASS with zero ownership violations.
+
+### Stage 2: 39-case 8-worker key-count curve
+
+~~~bash
+python3 tools/apt/run_suite.py \
+  --suite tools/apt/suites/live_key_scaling_8.json --fail-fast
+~~~
+
+Lock counts are **1, 4, 16, 64, 256, 1000, and 4096**; for all counts
+greater than one, compare uniform with Zipf(alpha=0.99). Each has three
+repetitions and a 1000 ms measured interval (zero warmup), giving
+13 key-count/distribution configurations times three trials. Eight
+total CN workers = 4 workers per CN.
+
+This is a **scaling survey**, not the prior 2-second matched DecLock
+measurement. Do not plot its throughput alongside the 2-second historical
+samples without marking the differing measurement duration.
+
+### Stage 3: optional 39-case 16-worker curve
+
+~~~bash
+python3 tools/apt/run_suite.py \
+  --suite tools/apt/suites/live_key_scaling_16.json --fail-fast
+~~~
+
+Exactly the same workload factors, but eight workers per CN / 16 total,
+to identify whether the previously observed scaling collapse persists as
+the key count increases. These configurations can be paired with Stage 2.
+
+**Read the curves before touching other tunables.** Look for:
+(i) the key-count knee at which throughput stops improving, (ii) P99
+latency and P99 handoff-wait changes, (iii) residual Zipf hot-key
+contention relative to uniform, (iv) whether 16 workers finally scale
+beyond eight. If the raw multi-key curve remains near one-key throughput,
+investigate the single-threaded coordinator's synchronous decisions and
+per-key scanning; do not randomly vary JOIN, pipelining or polling knobs.
+
+All three suites explicitly set handoff_preconnect=0 and both polling
+backoffs to 0, so they reproduce the original hot-path algorithm even
+though the new implementation defaults to early connection. Later,
+select a representative high-contention and low-contention key count
+for focused A/B optimization tests.
+
 ## CPU polling and early handoff connection experiment
 
 This is **MuCQL-only tuning**, not a DecLock benchmark or a demonstrated

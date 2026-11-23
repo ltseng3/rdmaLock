@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <cerrno>
 #include <array>
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstring>
@@ -230,6 +231,12 @@ struct RdmaAcceptor::Impl {
   std::array<ValueWire,kBatchCap> batch_values{};
   std::array<uint64_t,kBatchCap> batch_old{};
   ibv_mr* batch_values_mr{};ibv_mr* batch_old_mr{};
+  struct AsyncBatch {
+    std::vector<size_t> slots;
+    std::chrono::steady_clock::time_point start;
+  };
+  std::map<uint64_t,AsyncBatch> async_batches;
+  std::array<bool,kBatchCap> used{},completed{};
   std::mutex mu;bool pending{false};bool poisoned{false};size_t pending_batch{0};
   std::map<uint64_t,ValueWire> posted; // forbid same-ballot slot equivocation
   Impl(std::string h,uint16_t p,RdmaPaxosOptions o):dev(o),opts(std::move(o)),host(std::move(h)),port(p){
@@ -240,7 +247,7 @@ struct RdmaAcceptor::Impl {
     if(!value_mr||!atomic_mr||!batch_values_mr||!batch_old_mr)
       fail("register local accepted buffers");
   }
-  ~Impl(){if(sock>=0)::close(sock);if(value_mr)ibv_dereg_mr(value_mr);
+  ~Impl(){qp.reset();if(sock>=0)::close(sock);if(value_mr)ibv_dereg_mr(value_mr);
     if(atomic_mr)ibv_dereg_mr(atomic_mr);
     if(batch_values_mr)ibv_dereg_mr(batch_values_mr);
     if(batch_old_mr)ibv_dereg_mr(batch_old_mr);}
@@ -277,6 +284,7 @@ Promise RdmaAcceptor::prepare(uint64_t ballot){
     uint8_t ready=0;recv_all(impl_->sock,&ready,1);if(ready!=0x51)fail("QP handshake");
     impl_->posted.clear();
     impl_->poisoned=false;impl_->pending=false;impl_->pending_batch=0;
+    impl_->async_batches.clear();impl_->used.fill(false);impl_->completed.fill(false);
     impl_->prepared_ballot=ballot;
     return promise;
   }catch(const std::exception&e){
@@ -291,7 +299,7 @@ bool RdmaAcceptor::accept(uint64_t ballot,const Record& r){
 }
 void RdmaAcceptor::begin_accept(uint64_t ballot,const Record&r){
   std::lock_guard<std::mutex> l(impl_->mu);
-  if(impl_->pending || impl_->pending_batch || impl_->poisoned)
+  if(impl_->pending || impl_->pending_batch || impl_->poisoned || !impl_->async_batches.empty())
     throw std::logic_error("undrained/failed RDMA QP: recover with a higher ballot");
   if(!impl_->qp || ballot!=impl_->prepared_ballot||r.index==0||r.index>impl_->remote.slots)
     throw std::runtime_error("unprepared ballot or out-of-range slot");
@@ -341,7 +349,7 @@ void RdmaAcceptor::begin_accept_batch(uint64_t ballot,
                                      const std::vector<Record>& records){
   std::lock_guard<std::mutex> l(impl_->mu);
   if(records.empty() || records.size()>Impl::kBatchCap)throw std::invalid_argument("bad RDMA batch size");
-  if(impl_->pending||impl_->pending_batch||impl_->poisoned)
+  if(impl_->pending||impl_->pending_batch||impl_->poisoned||!impl_->async_batches.empty())
     throw std::logic_error("undrained/failed RDMA batch QP: recover with higher ballot");
   if(!impl_->qp || ballot!=impl_->prepared_ballot)
     throw std::runtime_error("RDMA batch submitted on unprepared ballot");
@@ -401,6 +409,86 @@ std::vector<bool> RdmaAcceptor::finish_accept_batch(){
     result.push_back(impl_->batch_old[i]==0||impl_->batch_old[i]==mark(idx));
   }
   impl_->pending_batch=0;
+  return result;
+}
+void RdmaAcceptor::submit_batch(uint64_t id,uint64_t ballot,
+                                const std::vector<Record>& records){
+  std::lock_guard<std::mutex> l(impl_->mu);
+  if(!id||records.empty()||records.size()>Impl::kBatchCap||impl_->async_batches.count(id))
+    throw std::invalid_argument("invalid async RDMA batch");
+  if(impl_->pending||impl_->pending_batch||impl_->poisoned)
+    throw std::logic_error("undrained/failed RDMA QP");
+  if(!impl_->qp||ballot!=impl_->prepared_ballot)
+    throw std::runtime_error("unprepared async RDMA ballot");
+  if(records.size()>size_t(std::count(impl_->used.begin(),impl_->used.end(),false)))
+    throw std::logic_error("async RDMA buffers full");
+  for(size_t i=0;i<records.size();++i){
+    const auto& r=records[i];
+    if(!r.index||r.index>impl_->remote.slots||(i&&r.index!=records[i-1].index+1))
+      throw std::invalid_argument("invalid async RDMA indices");
+    auto previous=impl_->posted.find(r.index);auto w=pack(r);
+    if(previous!=impl_->posted.end()&&std::memcmp(&previous->second,&w,sizeof(w)))
+      throw std::logic_error("same-ballot async slot equivocation");
+  }
+  Impl::AsyncBatch batch;batch.start=std::chrono::steady_clock::now();
+  for(const auto& r:records){
+    auto slot=size_t(std::find(impl_->used.begin(),impl_->used.end(),false)-impl_->used.begin());
+    impl_->used[slot]=true;impl_->completed[slot]=false;
+    impl_->batch_values[slot]=pack(r);impl_->batch_old[slot]=0;
+    impl_->posted[r.index]=pack(r);batch.slots.push_back(slot);
+  }
+  impl_->async_batches.emplace(id,std::move(batch));
+  for(auto slot:impl_->async_batches.at(id).slots){
+    const auto index=impl_->batch_values[slot].index;
+    const uint64_t base=impl_->remote.addr+(index-1)*sizeof(AcceptedSlot);
+    ibv_sge payload{};payload.addr=reinterpret_cast<uintptr_t>(&impl_->batch_values[slot]);
+    payload.length=sizeof(ValueWire);payload.lkey=impl_->batch_values_mr->lkey;
+    ibv_sge result{};result.addr=reinterpret_cast<uintptr_t>(&impl_->batch_old[slot]);
+    result.length=8;result.lkey=impl_->batch_old_mr->lkey;
+    ibv_send_wr write{};write.sg_list=&payload;write.num_sge=1;write.opcode=IBV_WR_RDMA_WRITE;
+    write.wr.rdma.remote_addr=base;write.wr.rdma.rkey=impl_->remote.rkey;
+    ibv_send_wr cas{};cas.sg_list=&result;cas.num_sge=1;
+    cas.wr_id=slot+1;cas.opcode=IBV_WR_ATOMIC_CMP_AND_SWP;cas.send_flags=IBV_SEND_SIGNALED;
+    cas.wr.atomic.remote_addr=base+offsetof(AcceptedSlot,marker);
+    cas.wr.atomic.rkey=impl_->remote.rkey;cas.wr.atomic.compare_add=0;cas.wr.atomic.swap=mark(index);
+    write.next=&cas;ibv_send_wr* bad=nullptr;
+    if(ibv_post_send(impl_->qp->qp,&write,&bad)){
+      // Partial posts may still DMA. Keep their buffers pinned and forbid
+      // reuse until the QP is destroyed by higher-ballot recovery.
+      impl_->poisoned=true;
+      throw std::runtime_error("async RDMA post failed; QP poisoned");
+    }
+  }
+}
+std::optional<std::vector<bool>> RdmaAcceptor::poll_batch(uint64_t id){
+  std::lock_guard<std::mutex> l(impl_->mu);
+  auto batch=impl_->async_batches.find(id);
+  if(batch==impl_->async_batches.end())throw std::logic_error("unknown async RDMA batch");
+  // Bounded nonblocking progress; dispatch completions by stable buffer ID,
+  // not by the batch the caller happened to poll first.
+  for(size_t i=0;i<Impl::kBatchCap&&!impl_->poisoned;++i){
+    ibv_wc wc{};int n=ibv_poll_cq(impl_->qp->cq,1,&wc);
+    if(!n)break;
+    if(n<0||wc.status!=IBV_WC_SUCCESS||!wc.wr_id||wc.wr_id>Impl::kBatchCap||
+       !impl_->used[wc.wr_id-1]||impl_->completed[wc.wr_id-1]){
+      impl_->poisoned=true;break;
+    }
+    impl_->completed[wc.wr_id-1]=true;
+  }
+  const auto& slots=batch->second.slots;
+  bool ready=std::all_of(slots.begin(),slots.end(),[&](size_t i){return impl_->completed[i];});
+  if(!ready&&std::chrono::steady_clock::now()-batch->second.start>std::chrono::seconds(3))
+    impl_->poisoned=true;
+  if(!ready&&!impl_->poisoned)return std::nullopt;
+  std::vector<bool> result;
+  for(auto slot:slots){
+    result.push_back(!impl_->poisoned&&(impl_->batch_old[slot]==0||
+                     impl_->batch_old[slot]==mark(impl_->batch_values[slot].index)));
+    // A poisoned QP is never submitted to again; outstanding DMA buffers
+    // remain registered even after the token is retired.
+    if(!impl_->poisoned)impl_->used[slot]=false;
+  }
+  impl_->async_batches.erase(batch);
   return result;
 }
 void serve_rdma_paxos(uint16_t port,const RdmaPaxosOptions& o){

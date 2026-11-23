@@ -58,6 +58,8 @@ bool PaxosJournal::accept_to_majority(const Record& r) {
 }
 void PaxosJournal::take_over() {
   std::lock_guard<std::mutex> l(mu_);
+  leader_=false;
+  if(!pending_.empty())throw std::logic_error("recover pending pipeline with a new journal/ballot");
   // Phase-1 response contains all accepted slots, including uncommitted.
   std::map<uint64_t,Accepted> merged;
   size_t promised=0;
@@ -92,6 +94,7 @@ void PaxosJournal::take_over() {
     expected++;
   }
   decided_=std::move(restored);
+  submitted_=decided_.size();
   leader_=true;
 }
 Record PaxosJournal::commit(Record proposal) {
@@ -119,6 +122,7 @@ bool PaxosJournal::accept_batch_to_majority(const std::vector<Record>& records) 
 std::vector<Record> PaxosJournal::commit_batch(std::vector<Record> proposals) {
   std::lock_guard<std::mutex> l(mu_);
   if(!leader_)throw std::runtime_error("not a prepared leader");
+  if(!pending_.empty())throw std::logic_error("synchronous commit during async pipeline");
   if(proposals.empty())return {};
   if(proposals.size()>32)throw std::invalid_argument("batch must be 1..32");
   for(size_t i=0;i<proposals.size();++i)proposals[i].index=decided_.size()+i+1;
@@ -137,11 +141,90 @@ std::vector<Record> PaxosJournal::commit_batch(std::vector<Record> proposals) {
     }
   }
   decided_.insert(decided_.end(),proposals.begin(),proposals.end());
+  submitted_=decided_.size();
   return proposals;
+}
+uint64_t PaxosJournal::submit_batch(std::vector<Record> proposals) {
+  std::lock_guard<std::mutex> l(mu_);
+  if(!leader_)throw std::runtime_error("not a prepared leader");
+  if(proposals.empty()||proposals.size()>phase2_window_)
+    throw std::invalid_argument("async batch exceeds phase2 window");
+  if(proposals.size()>32-inflight_records_)
+    throw std::logic_error("async pipeline has no credits");
+  Pending p;p.id=next_batch_++;p.records=std::move(proposals);
+  for(auto& r:p.records)r.index=++submitted_;
+  const auto& replicas=quorum_.nodes();
+  p.finished.resize(replicas.size(),false);p.votes.resize(p.records.size(),0);
+  const bool overlapping=std::any_of(pending_.begin(),pending_.end(),
+      [](const Pending& old){return !old.published;});
+  pending_.push_back(std::move(p));
+  auto& posted=pending_.back();
+  inflight_records_+=posted.records.size();
+  ++phase2_stats_.windows;phase2_stats_.records+=posted.records.size();
+  if(posted.records.size()>1)++phase2_stats_.multi_record_windows;
+  phase2_stats_.max_window=std::max(phase2_stats_.max_window,posted.records.size());
+  phase2_stats_.max_inflight_batches=std::max(phase2_stats_.max_inflight_batches,pending_.size());
+  phase2_stats_.max_inflight_records=std::max(phase2_stats_.max_inflight_records,inflight_records_);
+  if(overlapping)++phase2_stats_.overlap_submissions;
+  for(size_t i=0;i<replicas.size();++i){
+    try{replicas[i]->submit_batch(posted.id,ballot_,posted.records);}
+    catch(const std::exception&){posted.finished[i]=true;}
+  }
+  return posted.id;
+}
+std::vector<PaxosJournal::Completion> PaxosJournal::poll_commits() {
+  std::lock_guard<std::mutex> l(mu_);
+  if(!leader_)throw std::runtime_error("not a prepared leader");
+  const auto& replicas=quorum_.nodes();
+  // Poll every replica and every outstanding batch, including a slow tail
+  // of an already chosen batch. No wait on one follower blocks another.
+  for(auto& p:pending_){
+    for(size_t i=0;i<replicas.size();++i){
+      if(p.finished[i])continue;
+      try{
+        auto result=replicas[i]->poll_batch(p.id);
+        if(!result)continue;
+        p.finished[i]=true;
+        if(result->size()==p.records.size())
+          for(size_t j=0;j<result->size();++j)if((*result)[j])++p.votes[j];
+      }catch(const std::exception&){p.finished[i]=true;}
+    }
+    const auto remaining=std::count(p.finished.begin(),p.finished.end(),false);
+    for(auto votes:p.votes)if(votes+remaining<quorum_.majority()){
+      leader_=false;
+      throw std::runtime_error("async phase 2 quorum failed; recover at a higher ballot");
+    }
+  }
+  std::vector<Completion> result;
+  for(auto& p:pending_){
+    if(p.published)continue;
+    if(!std::all_of(p.votes.begin(),p.votes.end(),[&](size_t n){return n>=quorum_.majority();}))break;
+    decided_.insert(decided_.end(),p.records.begin(),p.records.end());
+    p.published=true;result.push_back({p.id,p.records});
+  }
+  // Credits protect registered buffers until ALL replicas have completed
+  // or failed. Publication itself only needs a quorum.
+  for(auto it=pending_.begin();it!=pending_.end();){
+    if(it->published&&std::all_of(it->finished.begin(),it->finished.end(),[](bool b){return b;})){
+      inflight_records_-=it->records.size();it=pending_.erase(it);
+    }else ++it;
+  }
+  return result;
+}
+size_t PaxosJournal::available_slots() const {
+  std::lock_guard<std::mutex> l(mu_);return 32-inflight_records_;
+}
+size_t PaxosJournal::submitted_count() const {
+  std::lock_guard<std::mutex> l(mu_);return submitted_;
+}
+bool PaxosJournal::pipeline_idle() const {
+  std::lock_guard<std::mutex> l(mu_);return pending_.empty();
 }
 void PaxosJournal::set_phase2_window(size_t n){
   if(n<1||n>32)throw std::invalid_argument("phase2 window must be 1..32");
-  std::lock_guard<std::mutex> l(mu_);phase2_window_=n;
+  std::lock_guard<std::mutex> l(mu_);
+  if(!pending_.empty())throw std::logic_error("changing window with pending pipeline");
+  phase2_window_=n;
 }
 PaxosJournal::Phase2Stats PaxosJournal::phase2_stats() const {
   std::lock_guard<std::mutex> l(mu_);return phase2_stats_;

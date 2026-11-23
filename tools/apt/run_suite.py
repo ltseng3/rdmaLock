@@ -51,6 +51,7 @@ COLUMNS = ['case', 'scenario', 'trial', 'kind', 'measurement_scope', 'comparable
            'multi_key_pipeline','cross_key_join_batches','cross_key_prepare_batches',
            'phase2_windows_posted','phase2_multi_record_windows','phase2_max_window',
            'phase2_records_posted',
+           'phase2_max_inflight_batches','phase2_max_inflight_records','phase2_overlap_submissions',
            'join_key_visits', 'prepare_key_visits', 'distinct_keys_seen',
            'latency_p50_ns', 'latency_p95_ns',
            'latency_p99_ns', 'admission_p50_ns', 'admission_p99_ns', 'handoff_wait_p99_ns', 'error']
@@ -257,10 +258,14 @@ def extract_live(text):
     # require them when reading archived benchmark output.
     worklist=('join_key_visits','prepare_key_visits','distinct_keys_seen')
     if any(k in result for k in worklist):
+        # Async PREPARE completion can re-arm a hot key to fill lookahead,
+        # in addition to re-arming on JOIN and certified release events.
+        refill_visits=(int(result['prepare_records'])
+                       if result.get('multi_key_pipeline')=='1' else 0)
         if (not all(k in result for k in worklist) or
             any(not result[k].isdigit() for k in worklist) or
             int(result['join_key_visits'])>int(result['joins']) or
-            int(result['prepare_key_visits'])>int(result['joins'])+int(result['completed']) or
+            int(result['prepare_key_visits'])>int(result['joins'])+int(result['completed'])+refill_visits or
             int(result['distinct_keys_seen'])>int(result['joins'])):
             raise ValueError('LIVE dirty-key accounting inconsistent')
     phase2=('multi_key_pipeline','cross_key_join_batches',
@@ -282,6 +287,21 @@ def extract_live(text):
              (int(result['cross_key_join_batches']) or
               int(result['cross_key_prepare_batches'])))):
             raise ValueError('invalid asynchronous phase-2 diagnostics')
+    overlap=('phase2_max_inflight_batches','phase2_max_inflight_records',
+             'phase2_overlap_submissions')
+    if any(k in result for k in overlap):
+        if (not all(k in result for k in overlap+phase2) or
+            any(not result[k].isdigit() for k in overlap)):
+            raise ValueError('invalid asynchronous phase-2 overlap diagnostics')
+        batches,records,submissions=(int(result[k]) for k in overlap)
+        if (batches>records or records>32 or
+            batches>int(result['phase2_windows_posted']) or
+            records>int(result['phase2_records_posted']) or
+            submissions>=max(1,int(result['phase2_windows_posted'])) or
+            (submissions and batches<2) or
+            (int(result['multi_key_pipeline'])==0 and (batches or records or submissions)) or
+            (int(result['multi_key_pipeline'])==1 and (not batches or not records))):
+            raise ValueError('invalid asynchronous phase-2 overlap diagnostics')
     for key in ('goodput_ops_per_sec','actual_join_batch_mean'):
         if not math.isfinite(float(result[key])) or float(result[key])<=0:
             raise ValueError('invalid LIVE metric '+key)
@@ -488,7 +508,9 @@ def benchmark(ex, case, topology, commit, session, run_root, ballot, timeout):
             for k in ('join_key_visits','prepare_key_visits','distinct_keys_seen','go_epoch_ns',
                       'multi_key_pipeline','cross_key_join_batches','cross_key_prepare_batches',
                       'phase2_windows_posted','phase2_multi_record_windows',
-                      'phase2_max_window','phase2_records_posted'):
+                      'phase2_max_window','phase2_records_posted',
+                      'phase2_max_inflight_batches','phase2_max_inflight_records',
+                      'phase2_overlap_submissions'):
                 row[k]=summary.get(k,'')
         elif case['kind'] == 'prepared_e2e':
             for f in ('completed', 'verified_markers', 'violations', 'ordering_seconds',

@@ -48,6 +48,34 @@ int main(){
   require(j.phase2_stats().max_window==8);
   require(j.phase2_stats().multi_record_windows>=2);
   require(j.snapshot().size()==23);
+  // Multiple independent batches coexist on each real transport QP. The
+  // mock defers DMA until polling, so buffer reuse bugs cannot hide behind
+  // an immediate memcpy in ibv_post_send.
+  std::vector<uint64_t> pending;
+  for(uint64_t key=2000;key<2008;++key)
+    pending.push_back(j.submit_batch(a.stage_join_many({{key,key,1}})));
+  require(j.snapshot().size()==23);
+  size_t completed=0;
+  for(size_t spin=0;completed<8&&spin<10000;++spin){
+    for(const auto& result:j.poll_commits()){
+      require(result.id==pending[completed]);
+      auto tickets=a.apply_committed(result.records);
+      require(tickets.size()==1&&tickets[0].lock==2000+completed);
+      ++completed;
+    }
+  }
+  require(completed==8&&j.pipeline_idle());
+  require(j.phase2_stats().max_inflight_batches==8);
+  require(j.phase2_stats().overlap_submissions==7);
+  // Reuse reclaimed buffers with different values, then recover everything.
+  for(uint64_t key=3000;key<3008;++key)
+    j.submit_batch(a.stage_join_many({{key,key,1}}));
+  completed=0;
+  for(size_t spin=0;completed<8&&spin<10000;++spin)
+    for(const auto& result:j.poll_commits()){
+      a.apply_committed(result.records);++completed;
+    }
+  require(completed==8&&j.pipeline_idle());
   std::vector<std::shared_ptr<Acceptor>> newer;
   for(int i=0;i<3;i++)newer.push_back(std::make_shared<RdmaAcceptor>("127.0.0.1",29660+i,o));
   LocalQuorum q2(newer);PaxosJournal newer_j(q2,20);newer_j.take_over();
@@ -57,6 +85,8 @@ int main(){
     const auto q=recovered.ordered(keys[i]);
     require(q.size()==1 && q[0].grant_id==joined_cross[i].grant_id);
     require(q[0].deadline==prepared_cross[i].deadline);
+    require(recovered.ordered(2000+i).at(0).client==2000+i);
+    require(recovered.ordered(3000+i).at(0).client==3000+i);
   }
   require(recovered.join(7,199,1).position==6);
   bool lost_leadership=false;

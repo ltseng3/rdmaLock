@@ -21,6 +21,11 @@ std::unordered_map<uint32_t,ibv_qp*> qps;
 struct Receive {uint64_t wr_id;ibv_sge sg;};
 std::unordered_map<ibv_qp*,std::deque<Receive>> posted;
 std::unordered_map<ibv_cq*,std::deque<ibv_wc>> completed;
+// Preserve the SGE address, not its payload. Async Phase-2 DMA happens on
+// progress, so overwriting a still-owned registered buffer corrupts tests.
+struct DeferredWr {ibv_send_wr wr;ibv_sge sge;};
+struct DeferredQueue {std::deque<DeferredWr> wrs;size_t polls{};};
+std::unordered_map<ibv_qp*,DeferredQueue> deferred;
 }
 extern "C" {
 ibv_device** ibv_get_device_list(int*n){*n=1;return devlist;}
@@ -34,7 +39,7 @@ int ibv_dealloc_pd(ibv_pd*){return 0;}
 ibv_cq* ibv_create_cq(ibv_context*,int,void*,void*,int){return new ibv_cq{0};}
 int ibv_destroy_cq(ibv_cq*c){std::lock_guard<std::mutex> l(m);completed.erase(c);delete c;return 0;}
 ibv_qp* ibv_create_qp(ibv_pd*,ibv_qp_init_attr* attr){std::lock_guard<std::mutex> l(m);auto* qp=new ibv_qp{next_qp++,attr->send_cq,0,IBV_QPS_INIT,attr->recv_cq};qps[qp->qp_num]=qp;return qp;}
-int ibv_destroy_qp(ibv_qp*q){std::lock_guard<std::mutex> l(m);qps.erase(q->qp_num);posted.erase(q);delete q;return 0;}
+int ibv_destroy_qp(ibv_qp*q){std::lock_guard<std::mutex> l(m);qps.erase(q->qp_num);posted.erase(q);deferred.erase(q);delete q;return 0;}
 int ibv_modify_qp(ibv_qp*q,ibv_qp_attr*a,int flags){std::lock_guard<std::mutex> l(m);
   if(flags&IBV_QP_STATE)q->state=a->qp_state;
   if(flags&IBV_QP_DEST_QPN)q->remote_qpn=a->dest_qp_num;
@@ -65,8 +70,8 @@ int ibv_post_recv(ibv_qp* q,ibv_recv_wr*wr,ibv_recv_wr**bad){
   }
   return 0;
 }
-int ibv_post_send(ibv_qp* q,ibv_send_wr*wr,ibv_send_wr**bad){
-  std::lock_guard<std::mutex> l(m);*bad=nullptr;
+int mock_execute_send(ibv_qp* q,ibv_send_wr*wr,ibv_send_wr**bad){
+  *bad=nullptr;
   auto peer=qps.find(q->remote_qpn);
   if(q->state!=IBV_QPS_RTS||peer==qps.end()||peer->second->state!=IBV_QPS_RTS)return -1;
   for(auto* w=wr;w;w=w->next){
@@ -108,8 +113,35 @@ int ibv_post_send(ibv_qp* q,ibv_send_wr*wr,ibv_send_wr**bad){
   }
   return 0;
 }
+int ibv_post_send(ibv_qp* q,ibv_send_wr*wr,ibv_send_wr**bad){
+  std::lock_guard<std::mutex> l(m);*bad=nullptr;
+  const bool phase2=wr->opcode==IBV_WR_RDMA_WRITE&&wr->next&&
+    wr->next->opcode==IBV_WR_ATOMIC_CMP_AND_SWP&&wr->next->wr_id;
+  if(!phase2)return mock_execute_send(q,wr,bad);
+  auto peer=qps.find(q->remote_qpn);
+  if(q->state!=IBV_QPS_RTS||peer==qps.end()||peer->second->state!=IBV_QPS_RTS)return -1;
+  auto& queue=deferred[q];
+  if(queue.wrs.empty()){
+    const char* polls=std::getenv("MUCQL_MOCK_PHASE2_DELAY_POLLS");
+    queue.polls=polls?std::stoul(polls):1;
+  }
+  for(auto* w=wr;w;w=w->next)queue.wrs.push_back({*w,*w->sg_list});
+  return 0;
+}
 int ibv_poll_cq(ibv_cq*c,int,ibv_wc*wc){
   std::lock_guard<std::mutex> l(m);
+  for(auto& entry:deferred){
+    if(entry.first->cq!=c||entry.second.wrs.empty())continue;
+    auto& queue=entry.second;
+    if(queue.polls){--queue.polls;continue;}
+    while(!queue.wrs.empty()){
+      auto& next=queue.wrs.front();next.wr.next=nullptr;next.wr.sg_list=&next.sge;
+      ibv_send_wr* bad=nullptr;
+      if(mock_execute_send(entry.first,&next.wr,&bad))
+        completed[c].push_back({1,next.wr.wr_id,0});
+      queue.wrs.pop_front();
+    }
+  }
   auto& q=completed[c];if(q.empty())return 0;
   *wc=q.front();q.pop_front();return 1;
 }

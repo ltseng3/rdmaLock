@@ -305,39 +305,68 @@ int coordinator(int argc,char**argv){
   std::thread ordering_thread;
   if(multi_key_pipeline){
     ordering_thread=std::thread([&]{
-      for(;;){
-        PipeTask task;
-        {
-          std::unique_lock<std::mutex> lock(task_mu);
-          task_cv.wait(lock,[&]{return task_stop||!tasks.empty();});
-          if(task_stop)return;
-          task=std::move(tasks.front());tasks.pop_front();
-        }
-        PipeResult result;result.prepare=task.prepare;
-        result.observe=task.observe;
-        result.submitted_joins=task.joins.size();
-        try{
-          if(task.observe){
-            leader.observe(task.marker);
-          }else if(task.prepare){
-            // The existing non-recycling log never accepts work at its cap.
-            if(journal.decided_count()+task.locks.size()>=o.paxos_slots)
-              fail("journal full before pipelined PREPARE");
-            result.tickets=leader.prepare_many(task.locks,o.prepare_range);
-          }else{
-            if(!join_log_has_room(journal.decided_count(),task.joins.size(),
-                                  o.paxos_slots))
-              fail("nonrecycling journal exhausted before pipelined JOIN");
-            result.tickets=leader.join_many(task.joins);
-          }
-        }catch(...){result.error=std::current_exception();}
-        const bool failed=bool(result.error);
-        {
-          std::lock_guard<std::mutex> lock(mu);
-          finished_tasks.push_back(std::move(result));
-        }
+      std::deque<PipeTask> work;
+      std::map<uint64_t,PipeResult> active;
+      auto deliver=[&](PipeResult result){
+        {std::lock_guard<std::mutex> lock(mu);finished_tasks.push_back(std::move(result));}
         cv.notify_one();
-        if(failed)return; // the coordinator fails; no speculative retries
+      };
+      try{
+        for(;;){
+          {
+            std::unique_lock<std::mutex> lock(task_mu);
+            if(work.empty()&&active.empty()&&journal.pipeline_idle())
+              task_cv.wait(lock,[&]{return task_stop||!tasks.empty();});
+            if(task_stop)return;
+            while(!tasks.empty()){
+              work.push_back(std::move(tasks.front()));tasks.pop_front();
+            }
+          }
+          // Skip a blocked key while preserving FIFO among tasks sharing
+          // any key. Only unresolved mutations reserve a key; certified
+          // observations may update already committed release state.
+          std::set<LockId> blocked;
+          for(auto it=work.begin();it!=work.end();){
+            std::vector<LockId> keys=it->locks;
+            for(const auto& join:it->joins)keys.push_back(join.lock);
+            if(it->observe){
+              leader.observe(it->marker);
+              PipeResult result;result.observe=true;deliver(std::move(result));
+              it=work.erase(it);continue;
+            }
+            const auto count=it->prepare?it->locks.size():it->joins.size();
+            const bool conflict=std::any_of(keys.begin(),keys.end(),
+                [&](LockId key){return blocked.count(key);});
+            if(conflict||!leader.can_stage(keys)||count>journal.available_slots()){
+              blocked.insert(keys.begin(),keys.end());++it;continue;
+            }
+            PipeResult result;result.prepare=it->prepare;
+            result.submitted_joins=it->joins.size();
+            // Include reserved, uncommitted indices in nonrecycling limits.
+            if(it->prepare){
+              if(journal.submitted_count()+count>=o.paxos_slots)
+                fail("journal full before pipelined PREPARE");
+            }else if(!join_log_has_room(journal.submitted_count(),count,o.paxos_slots)){
+              fail("nonrecycling journal exhausted before pipelined JOIN");
+            }
+            auto records=it->prepare?leader.stage_prepare_many(it->locks,o.prepare_range):
+                                     leader.stage_join_many(it->joins);
+            if(records.empty())deliver(std::move(result));
+            else active.emplace(journal.submit_batch(std::move(records)),std::move(result));
+            it=work.erase(it);
+          }
+          // Poll all outstanding tokens without waiting for one CQ. Only
+          // the journal's contiguous quorum-decided prefix reaches Leader.
+          for(auto& completion:journal.poll_commits()){
+            auto it=active.find(completion.id);
+            if(it==active.end())fail("unknown asynchronous journal completion");
+            it->second.tickets=leader.apply_committed(completion.records);
+            deliver(std::move(it->second));active.erase(it);
+          }
+          if(!active.empty()||!journal.pipeline_idle())std::this_thread::yield();
+        }
+      }catch(...){
+        PipeResult result;result.error=std::current_exception();deliver(std::move(result));
       }
     });
   }
@@ -384,8 +413,8 @@ int coordinator(int argc,char**argv){
         committed.swap(finished_tasks);
       }
       // Deliver nothing before a majority decision. These results are
-      // produced by the ordering thread AFTER finishing every CQE of its
-      // bounded batch, in the same order as their journal indices.
+      // produced in log order after a majority has completed each record.
+      // A slow non-quorum follower may still own pinned pipeline buffers.
       for(auto& result:committed){
         if(!pending_tasks)fail("orphan asynchronous quorum completion");
         pending_tasks--;
@@ -621,6 +650,9 @@ int coordinator(int argc,char**argv){
       <<" phase2_multi_record_windows="<<phase2.multi_record_windows
       <<" phase2_max_window="<<phase2.max_window
       <<" phase2_records_posted="<<phase2.records
+      <<" phase2_max_inflight_batches="<<phase2.max_inflight_batches
+      <<" phase2_max_inflight_records="<<phase2.max_inflight_records
+      <<" phase2_overlap_submissions="<<phase2.overlap_submissions
       <<" join_key_visits="<<join_key_visits
       <<" prepare_key_visits="<<prepare_key_visits
       <<" distinct_keys_seen="<<known.size()

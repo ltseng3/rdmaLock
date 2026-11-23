@@ -309,6 +309,33 @@ class LiveSuiteTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,'asynchronous phase-2'):
                     runner.extract_live(LIVE_LINE+invalid)
 
+    def test_sliding_pipeline_overlap_diagnostics(self):
+        phase2=(' multi_key_pipeline=1 cross_key_join_batches=4'
+                ' cross_key_prepare_batches=3 phase2_windows_posted=12'
+                ' phase2_multi_record_windows=7 phase2_max_window=16'
+                ' phase2_records_posted=64')
+        overlap=(' phase2_max_inflight_batches=3 phase2_max_inflight_records=24'
+                 ' phase2_overlap_submissions=5')
+        result=runner.extract_live(LIVE_LINE+phase2+overlap)
+        self.assertEqual(result['phase2_overlap_submissions'],'5')
+        # A committed PREPARE re-arms a hot key when more JOINs remain.
+        visits=int(result['joins'])+int(result['completed'])+1
+        refilled=(LIVE_LINE+phase2+overlap+
+                  f' join_key_visits=1 prepare_key_visits={visits} distinct_keys_seen=1')
+        self.assertEqual(runner.extract_live(refilled)['prepare_key_visits'],str(visits))
+        for key in ('phase2_max_inflight_batches','phase2_max_inflight_records',
+                    'phase2_overlap_submissions'):
+            self.assertIn(key,runner.COLUMNS)
+        for invalid in (
+            overlap.replace('batches=3','batches=1'),
+            overlap.replace('records=24','records=33'),
+            overlap.replace('submissions=5','submissions=12'),
+            overlap.replace('phase2_overlap_submissions=5',''),
+        ):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError,'asynchronous phase-2'):
+                    runner.extract_live(LIVE_LINE+phase2+invalid)
+
     def test_lock_count_sweep_varies_only_keyspace_and_distribution(self):
         suites=[
             ('live_key_scaling_smoke.json',22,4,1,500),

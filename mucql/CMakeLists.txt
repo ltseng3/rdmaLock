@@ -25,6 +25,10 @@ add_executable(mucql_multi_key_pipeline_test tests/test_multi_key_pipeline.cpp)
 target_link_libraries(mucql_multi_key_pipeline_test PRIVATE mucql_core Threads::Threads)
 target_compile_options(mucql_multi_key_pipeline_test PRIVATE -UNDEBUG -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME mucql_multi_key_phase2_quorum COMMAND mucql_multi_key_pipeline_test)
+add_executable(mucql_async_pipeline_test tests/test_async_pipeline.cpp)
+target_link_libraries(mucql_async_pipeline_test PRIVATE mucql_core Threads::Threads)
+target_compile_options(mucql_async_pipeline_test PRIVATE -UNDEBUG -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME mucql_async_phase2_pipeline COMMAND mucql_async_pipeline_test)
 
 
 add_executable(mucql_online_core_test tests/test_online_core.cpp)
@@ -201,10 +205,20 @@ set_tests_properties(mucql_live_hot_raw mucql_live_hot_optimized
       COMMAND mucql_live_mock_test 16 100000 16 16 1 2 0 1)
   add_test(NAME mucql_live_rdma_multikey_async_zipf_mock
       COMMAND mucql_live_mock_test 16 16 16 16 1 2 1 1)
+  add_test(NAME mucql_live_rdma_multikey_delayed_mock
+      COMMAND mucql_live_mock_test 16 100000 4 16 1 2 0 1)
+  add_test(NAME mucql_live_rdma_hotkey_async_mock
+      COMMAND mucql_live_mock_test 16 1 4 16 1 2 0 1)
   set_tests_properties(mucql_live_rdma_multikey_async_mock
       mucql_live_rdma_multikey_async_zipf_mock
       PROPERTIES ENVIRONMENT "MUCQL_CN_TRANSPORT=rdma;MUCQL_MULTI_KEY_PIPELINE=1;MUCQL_HANDOFF_PRECONNECT=0"
                  TIMEOUT 45 RUN_SERIAL TRUE)
+  set_tests_properties(mucql_live_rdma_multikey_delayed_mock
+      mucql_live_rdma_hotkey_async_mock
+      PROPERTIES ENVIRONMENT "MUCQL_CN_TRANSPORT=rdma;MUCQL_MULTI_KEY_PIPELINE=1;MUCQL_HANDOFF_PRECONNECT=0;MUCQL_MOCK_PHASE2_DELAY_POLLS=20"
+                 TIMEOUT 45 RUN_SERIAL TRUE)
+  set_tests_properties(mucql_live_rdma_multikey_delayed_mock PROPERTIES
+      PASS_REGULAR_EXPRESSION "phase2_overlap_submissions=[1-9][0-9]*")
 
   # The synchronized multi-instance GO gate is opt-in and leaves normal
   # benchmark latency accounting unchanged when unset.

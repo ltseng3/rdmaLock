@@ -6,6 +6,7 @@
 #include "mucql/core.hpp"
 #include <array>
 #include <atomic>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -35,6 +36,17 @@ class Acceptor {
     for(const auto& r:records)batch_results_.push_back(accept(ballot,r));
   }
   virtual std::vector<bool> finish_accept_batch() {return batch_results_;}
+  // Tokenized submissions may coexist. Poll never waits on an RDMA CQ.
+  // Local/TCP adapters complete synchronously at submission time.
+  virtual void submit_batch(uint64_t id,uint64_t ballot,const std::vector<Record>& records) {
+    begin_accept_batch(ballot,records);
+    async_results_[id]=finish_accept_batch();
+  }
+  virtual std::optional<std::vector<bool>> poll_batch(uint64_t id) {
+    auto it=async_results_.find(id);
+    if(it==async_results_.end())throw std::logic_error("unknown accept batch");
+    auto result=std::move(it->second);async_results_.erase(it);return result;
+  }
   virtual void crash(bool down); // unavailable, memory retained (crash-stop survivor)
  private:
   std::mutex mu_;
@@ -43,6 +55,7 @@ class Acceptor {
   bool down_{false};
   bool last_accept_{false};
   std::vector<bool> batch_results_;
+  std::map<uint64_t,std::vector<bool>> async_results_;
 };
 // Acceptors may be local, TCP, or an opt-in experimental RDMA transport.
 class LocalQuorum {
@@ -70,7 +83,17 @@ class PaxosJournal final: public Journal {
   void set_phase2_window(size_t n);
   struct Phase2Stats {
     size_t windows{},multi_record_windows{},records{},max_window{};
+    size_t max_inflight_batches{},max_inflight_records{},overlap_submissions{};
   };
+  struct Completion {uint64_t id;std::vector<Record> records;};
+  // Bounded to 32 unreclaimed records, across independently posted batches.
+  // Only a contiguous chosen prefix is published. A failed quorum poisons
+  // this epoch; all unacknowledged records must be recovered at a new ballot.
+  uint64_t submit_batch(std::vector<Record> proposals);
+  std::vector<Completion> poll_commits();
+  size_t available_slots() const;
+  size_t submitted_count() const;
+  bool pipeline_idle() const;
   // Counts *actually submitted* phase-2 log windows, not configured
   // settings. A successful multi-key experiment must show max_window >1.
   Phase2Stats phase2_stats() const;
@@ -88,6 +111,16 @@ class PaxosJournal final: public Journal {
   mutable std::mutex mu_;
   bool leader_{false};
   Phase2Stats phase2_stats_{};
+  struct Pending {
+    uint64_t id{};
+    std::vector<Record> records;
+    std::vector<bool> finished;
+    std::vector<size_t> votes;
+    bool published{};
+  };
+  std::deque<Pending> pending_;
+  size_t inflight_records_{};
+  uint64_t next_batch_{1},submitted_{};
   std::vector<Record> decided_;
 };
 }

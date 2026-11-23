@@ -199,7 +199,10 @@ set_tests_properties(mucql_live_hot_raw mucql_live_hot_optimized
   # majority-decided JOIN followed by a majority-decided PREPARE.
   add_test(NAME mucql_live_rdma_multikey_async_mock
       COMMAND mucql_live_mock_test 16 100000 16 16 1 2 0 1)
+  add_test(NAME mucql_live_rdma_multikey_async_zipf_mock
+      COMMAND mucql_live_mock_test 16 16 16 16 1 2 1 1)
   set_tests_properties(mucql_live_rdma_multikey_async_mock
+      mucql_live_rdma_multikey_async_zipf_mock
       PROPERTIES ENVIRONMENT "MUCQL_CN_TRANSPORT=rdma;MUCQL_MULTI_KEY_PIPELINE=1;MUCQL_HANDOFF_PRECONNECT=0"
                  TIMEOUT 45 RUN_SERIAL TRUE)
 

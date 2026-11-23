@@ -189,14 +189,19 @@ def case_topology(original, case, ballot):
         doc['clients'] = doc['clients'][:case['cn_count']]
         for cn in doc['clients']:
             cn['workers'] = case['workers_per_cn']
-    # Independent instances use separate bootstrap ports on the *same* nodes.
-    # 200-port strides exceed the 64-port worker reservation per instance.
+    # Parallel instances can select a dedicated base below the Linux
+    # ephemeral SSH/source-port range and rotate non-overlapping reservations
+    # for every measurement round. Ordinary suites retain their old ports.
+    # 200-port strides exceed each instance's 64-port worker reservation.
     offset=case.get('port_offset',0)
-    if type(offset) is not int or not 0<=offset<=1000 or offset%200:
-        raise ValueError('port_offset must be a multiple of 200 in 0..1000')
-    doc['ports'] = {name:base+offset for name,base in
-                    {'ordering':39660,'data':39670,'coordinator':39700,
-                     'worker_base':39711}.items()}
+    if type(offset) is not int or not 0<=offset<=12000 or offset%200:
+        raise ValueError('port_offset must be a multiple of 200 in 0..12000')
+    port_base=case.get('port_base',39660)
+    if type(port_base) is not int or not 1024<=port_base<=51000:
+        raise ValueError('port_base must be an integer 1024..51000')
+    doc['ports'] = {name:port_base+delta+offset for name,delta in
+                    {'ordering':0,'data':10,'coordinator':40,
+                     'worker_base':51}.items()}
     doc['benchmark'].update(positions=case['positions'], ballot=ballot,
                             order_batch=case['batch'], probe=case['probe'],
                             work_ns=case['work_ns'])

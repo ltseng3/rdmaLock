@@ -38,6 +38,11 @@ INSTANCE_COUNT=5
 TOTAL_KEYS=100000
 DEFAULT_PER_CN_WORKERS=8
 PORT_STRIDE=200
+# Stay below the default Linux ephemeral source-port range (32768+).
+# Five shards + one baseline reserve six disjoint 200-port blocks per
+# repetition; no port is reused before the whole experiment completes.
+PORT_BASE=16560
+ROUND_STRIDE=6*PORT_STRIDE
 GO_SKEW_LIMIT_NS=100_000_000
 
 
@@ -73,8 +78,8 @@ def make_cases(topo, count, repetition, gate,
     """One or five independent groups with constant client/key totals."""
     workers=worker_allocation(count,workers_per_cn)
     keys=key_allocation(workers)
-    if type(repetition) is not int or repetition<1:
-        raise ValueError("invalid repetition")
+    if type(repetition) is not int or not 1<=repetition<=10:
+        raise ValueError("repetition must be 1..10")
     if not isinstance(gate,str) or not 1<=len(gate)<=96 or not all(
             x.isascii() and (x.isalnum() or x in "_-") for x in gate):
         raise ValueError("invalid gate token")
@@ -97,7 +102,12 @@ def make_cases(topo, count, repetition, gate,
         }
         case=runner.expand_live(spec,topo,2026,0)[0]
         case['id']=f'p{count}-r{repetition}-i{i}'
-        case['port_offset']=i*PORT_STRIDE
+        # One baseline + five concurrent instances per round. Keep even
+        # sequential runs on distinct ports: TIME_WAIT on a previous
+        # server or SSH source port must never poison the next trial.
+        case['port_base']=PORT_BASE
+        case['port_offset']=(repetition-1)*ROUND_STRIDE+(
+            5*PORT_STRIDE if count==1 else i*PORT_STRIDE)
         case['start_gate']=gate
         # Fail during planning if any port/worker budget is invalid.
         doc=runner.case_topology(topo,case,topo['benchmark']['ballot']+repetition*10+i)

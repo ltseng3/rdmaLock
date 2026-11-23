@@ -369,7 +369,20 @@ the concurrency were identical.
 The independent accepted-log memory cost is **5 × 16 MiB per replica**
 in the parallel mode, rather than 16 MiB per replica in the single mode;
 five distinct QPs/servers also consume more RNIC resources. Each instance
-uses a separate port range at 39660/39670/39700/39711 + 200*i.
+uses separate port ranges below the default Linux ephemeral source-port
+range: ordering/data/coordinator/worker-base start at
+16560/16570/16600/16611, plus 200*i within a five-way group.
+Every single-leader control and every repetition now gets a **fresh**
+port block (1200-port stride per repetition); the run never immediately
+reuses a port that may still have SSH/RDMA TCP connections in TIME_WAIT.
+
+This addresses an observed 16-client run in which 40470 collided with an
+SSH source port and/or a recently closed connection; the real bind/listen
+preflight correctly refused the occupied port. The lifecycle code continues
+to probe actual TCP bindability and never kills unrelated listeners.
+All ports reserved by up to ten rounds stay below 32768. If the host
+uses a nondefault ephemeral range, check
+`cat /proc/sys/net/ipv4/ip_local_port_range` on the nodes first.
 
 A future Unix-nanosecond start gate is written **on MN4 only after all
 coordinators and CN RDMA channels report GO-ready**. All five services
@@ -390,7 +403,7 @@ python3 tools/apt/run_parallel_instances.py --workers-per-cn 8
 ~~~
 
 Default: **three repetitions of a single-leader round followed by a
-five-leader round**, with results at
+five-leader round**, each using fresh ports, with results at
 \`results/automation/<session>/aggregates.csv\` (aggregate/speedup inputs),
 \`runs.csv\` (all per-instance evidence, including timestamps and P99s), and
 per-node logs in separate instance folders. For a quick one-repetition

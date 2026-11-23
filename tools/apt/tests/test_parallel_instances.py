@@ -36,7 +36,9 @@ class ParallelInstanceTests(unittest.TestCase):
                     self.assertEqual({c['paxos_slots'] for c in cases},{131072})
                     self.assertEqual({c['max_ops'] for c in cases},{90000})
                     self.assertEqual(
-                        [c['port_offset'] for c in cases],[200*i for i in range(n)])
+                        [c['port_offset'] for c in cases],
+                        ([1000] if n==1 else [200*i for i in range(n)]))
+                    self.assertEqual({c['port_base'] for c in cases},{16560})
                     for c in cases:
                         cfg=suite.case_topology(TOPO,c,4101)
                         self.assertEqual(cfg['benchmark']['start_gate'],'TEST_GO')
@@ -75,17 +77,44 @@ class ParallelInstanceTests(unittest.TestCase):
         self.assertEqual(len(ports),5)
         self.assertEqual(sum(map(len,ports)),len(set().union(*ports)))
         self.assertEqual([suite.case_topology(TOPO,c,4101)['ports']['ordering']
-                          for c in cases],[39660,39860,40060,40260,40460])
+                          for c in cases],[16560,16760,16960,17160,17360])
         duplicated=json.loads(json.dumps(cases))
         duplicated[1]['port_offset']=0
         with self.assertRaisesRegex(ValueError,'overlap'):
             experiment.port_sets(TOPO,duplicated)
 
+    def test_no_port_reuse_between_baseline_five_instances_or_repetitions(self):
+        all_ranges=[]
+        # Six services per repetition (one control + five concurrent)
+        # receive distinct ports. None of our ports overlap typical Linux
+        # ephemeral SSH source ports (32768..60999), even in round ten.
+        for rep in range(1,11):
+            for count in (1,5):
+                cases=experiment.make_cases(TOPO,count,rep,'VALID',8)
+                all_ranges.extend(experiment.port_sets(TOPO,cases))
+        union=set().union(*all_ranges)
+        self.assertEqual(len(union),sum(map(len,all_ranges)))
+        self.assertLess(max(union),32768)
+        self.assertGreaterEqual(min(union),1024)
+        first_baseline=experiment.make_cases(TOPO,1,1,'VALID')[0]
+        first_five=experiment.make_cases(TOPO,5,1,'VALID')
+        second_five=experiment.make_cases(TOPO,5,2,'VALID')
+        self.assertEqual(first_baseline['port_offset'],1000)
+        self.assertEqual([c['port_offset'] for c in first_five],
+                         [0,200,400,600,800])
+        self.assertEqual([c['port_offset'] for c in second_five],
+                         [1200,1400,1600,1800,2000])
+
     def test_bad_parallel_ports_and_gate_rejected_in_topology(self):
         c=experiment.make_cases(TOPO,5,1,'VALID')[0]
-        for offset in (-1,100,1200,True):
+        for offset in (-1,100,12001,12200,True):
             with self.subTest(offset=offset):
                 bad=dict(c,port_offset=offset)
+                with self.assertRaises(ValueError):
+                    suite.case_topology(TOPO,bad,4101)
+        for base in (-1,0,True,'16560',51001):
+            with self.subTest(port_base=base):
+                bad=dict(c,port_base=base)
                 with self.assertRaises(ValueError):
                     suite.case_topology(TOPO,bad,4101)
         for token in ('../bad','bad/yes','bad.txt','',123):

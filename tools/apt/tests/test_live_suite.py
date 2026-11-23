@@ -226,9 +226,9 @@ class LiveSuiteTests(unittest.TestCase):
 
     def test_lock_count_sweep_varies_only_keyspace_and_distribution(self):
         suites=[
-            ('live_key_scaling_smoke.json',14,4,1,500),
-            ('live_key_scaling_8.json',39,4,0,1000),
-            ('live_key_scaling_16.json',39,8,0,1000),
+            ('live_key_scaling_smoke.json',22,4,1,500),
+            ('live_key_scaling_8.json',51,4,0,1000),
+            ('live_key_scaling_16.json',51,8,0,1000),
         ]
         for filename,count,wpc,probe,measure in suites:
             with self.subTest(suite=filename):
@@ -255,16 +255,41 @@ class LiveSuiteTests(unittest.TestCase):
                 self.assertNotIn((1,'zipf_0.99'),keys)
                 self.assertIn((4096,'uniform'),keys)
                 self.assertIn((4096,'zipf_0.99'),keys)
+                self.assertIn((100000,'uniform'),keys)
+                self.assertIn((100000,'zipf_0.99'),keys)
                 if measure==1000:
-                    self.assertEqual({x for x,_ in keys},{1,4,16,64,256,1000,4096})
+                    self.assertEqual({x for x,_ in keys},
+                                     {1,4,16,64,256,1000,4096,16384,100000})
                 else:
-                    self.assertEqual({x for x,_ in keys},{1,16,256,4096})
+                    self.assertEqual({x for x,_ in keys},{1,16,256,4096,16384,100000})
                 for c in cases:
                     cfg=runner.case_topology(TOPO,c,4101)
                     self.assertEqual(cfg['benchmark']['locks'],c['locks'])
                     self.assertEqual(cfg['benchmark']['zipf'],int(c['distribution']=='zipf_0.99'))
                     self.assertEqual(cfg['benchmark']['data_ops'],1)
                     self.assertEqual(cluster.validate(cfg),2*wpc)
+
+    def test_100k_keys_independent_of_accepted_log_capacity(self):
+        # Key population > accepted-log capacity must not be required.
+        # The release data region is separate and sized for both key slots.
+        base=dict(BASE)
+        base.update(locks=[100000],paxos_slots=131072,max_ops=90000,
+                    distributions=['uniform','zipf_0.99'])
+        cases=runner.expand_suite({'tests':[base]},TOPO)
+        self.assertEqual(len(cases),2)
+        for case in cases:
+            cfg=runner.case_topology(TOPO,case,4101)
+            self.assertEqual(cfg['benchmark']['locks'],100000)
+            self.assertEqual(cfg['benchmark']['paxos_slots'],131072)
+            self.assertEqual(cluster.validate(cfg),2)
+            cmds=cluster.commands(cfg,'data_mn')
+            # The existing non-recycling accepted-log reservation is NOT
+            # enlarged to the number of logical locks.
+            self.assertIn('331104',str(cmds))
+        for invalid in (100001, 0, -1, 1.5, True):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    runner.expand_suite({'tests':[dict(base,locks=[invalid])]},TOPO)
 
     def test_poll_policy_does_not_merge_unmatched_throughput(self):
         rows=[]

@@ -78,7 +78,7 @@ def validate(doc):
             if type(value) is not int or not 0<=value<=limit:
                 raise ValueError(f"live {knob} must be integer 0..{limit}")
         for name, lo, hi in (("max_ops", total, 1_000_000), ("paxos_slots", 4096, 1_000_000),
-                             ("locks", 1, 4096), ("join_aggregate", 1, 32),
+                             ("locks", 1, 100000), ("join_aggregate", 1, 32),
                              ("phase2_window", 1, 32), ("prepare_range", 1, 128),
                              ("lookahead", 2, 4096), ("replenish_threshold", 1, 4096),
                              ("batch_wait_us", 0, 5000), ("warmup_ms", 0, 60000),

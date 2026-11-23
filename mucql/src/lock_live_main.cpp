@@ -45,6 +45,15 @@ static constexpr uint64_t kMagic=0x4d5543514c4c4956ULL; // MUCQLLIV
 static constexpr uint64_t kLockBase=1;
 static constexpr uint64_t kMaxWorkers=64;
 static constexpr uint32_t kMaxSlots=1000000;
+static constexpr uint64_t kMaxLocks=100000; // Independent lock population; not log history.
+static constexpr uint64_t kPrepareLogReserve=64; // JOIN must leave room for PREPARE.
+bool join_log_has_room(uint64_t decided,uint64_t incoming,uint64_t slots){
+  // Decided-record count and lock population are independent. Every JOIN
+  // consumes a log index, but a key with no JOIN consumes none. Keep a
+  // fixed conservative PREPARE reserve, and fail explicitly at exhaustion.
+  return decided<slots && incoming<=slots-decided &&
+         slots-decided-incoming>kPrepareLogReserve;
+}
 enum MsgType:uint64_t {Join=1,Done=2,Quiescent=3,TicketReady=4,HandoffReady=5,Go=6,Stop=7,Finish=8};
 struct TicketWire {uint64_t lock,client,request,position,grant,predecessor,deadline;};
 struct Message {uint64_t magic,type,flags,latency_ns,admit_ns,wait_ns;TicketWire ticket;};
@@ -137,7 +146,7 @@ uint64_t release_slots(const Options& o){return o.paxos_slots+2*o.lock_count+32;
 uint64_t data_slot(const Options& o,LockId lock){return o.paxos_slots+lock-kLockBase;}
 uint64_t owner_slot(const Options& o,LockId lock){return o.paxos_slots+o.lock_count+lock-kLockBase;}
 void validate(const Options& o){
-  if(o.workers<2||o.workers>kMaxWorkers||o.lock_count<1||o.lock_count>4096||
+  if(o.workers<2||o.workers>kMaxWorkers||o.lock_count<1||o.lock_count>kMaxLocks||
      o.join_aggregate<1||o.join_aggregate>32||o.phase2_window<1||o.phase2_window>32||
      o.prepare_range<1||o.prepare_range>128||o.lookahead<2||o.lookahead>4096||
      o.prepare_range>o.lookahead||o.replenish_threshold<1||
@@ -172,7 +181,7 @@ int coordinator(int argc,char**argv){
   o.work_ns=number(argv[18],0,1000000000,"work_ns");
   o.warmup_ms=number(argv[19],0,60000,"warmup_ms");
   o.measure_ms=number(argv[20],50,120000,"measure_ms");
-  o.lock_count=number(argv[21],1,4096,"lock_count");
+  o.lock_count=number(argv[21],1,kMaxLocks,"lock_count");
   o.zipf=number(argv[22],0,1,"zipf");
   o.seed=number(argv[23],1,UINT64_MAX,"seed");
   // MUCQL_PAXOS_SLOTS is shared with acceptors; this prevents CLI sprawl.
@@ -300,7 +309,7 @@ int coordinator(int argc,char**argv){
       for(auto& [lock,queue]:waiting){
         while(!queue.empty()){
           const size_t cap=std::min<size_t>(o.join_aggregate,queue.size());
-          if(journal.decided_count()+cap+o.lock_count+64>=o.paxos_slots || joined+cap>o.max_ops)
+          if(!join_log_has_room(journal.decided_count(),cap,o.paxos_slots) || joined+cap>o.max_ops)
             fail("nonrecycling journal/operation cap exhausted BEFORE timed interval completed");
           std::vector<std::pair<ClientId,RequestId>> reqs;
           for(size_t i=0;i<cap;i++){
@@ -428,7 +437,7 @@ int worker(int argc,char**argv){
   const bool handoff_preconnect=env_number("MUCQL_HANDOFF_PRECONNECT",1,1)!=0;
   (void)rx_idle_us; // LiveControlChannel reads the same validated setting.
   if(cfg.magic!=kMagic||cfg.self!=id||cfg.workers>kMaxWorkers||cfg.workers<2||
-     cfg.paxos_slots!=slots||cfg.lock_count<1||cfg.lock_count>4096||
+     cfg.paxos_slots!=slots||cfg.lock_count<1||cfg.lock_count>kMaxLocks||
      cfg.transport!=(control_rdma?1ULL:0ULL))fail("bad LIVE config/slot/transport mismatch");
   std::vector<Peer> peers(cfg.workers);recv_exact(fd,peers.data(),sizeof(Peer)*peers.size());
   LiveControlChannel channel(fd,device,control_port(),control_rdma,sizeof(Message));

@@ -195,9 +195,12 @@ grep -R -E 'accepted MR registration|RDMA acceptor session|RDMA Paxos provisioni
 **Run this before the new idle-poll / early-connection tuning suites.**
 The one-key, all-exclusive workload is a useful stress test, but its
 serialized ownership transfer does not characterize multi-key scalability.
-The live benchmark already supports 1–4096 distinct lock IDs, deterministic
-uniform keys, and Zipf(alpha=0.99) keys. It does **not** support the paper's
-100,000-key default without a separate scalability redesign.
+The live benchmark now supports **1–100,000 distinct lock IDs**, deterministic
+uniform keys, and Zipf(alpha=0.99) keys. This matches DecLock's default key
+population, although MuCQL still implements only exclusive locks. A key
+population is **not** a committed-operation count: per-key protected data
+and owner-marker regions allocate 16 bytes per key, while the consensus
+history keeps its own fixed write-once budget. No log reclamation is enabled.
 
 This experiment changes **only the number of keys and the distribution**.
 To avoid an optimization confound, it holds the baseline at raw, RDMA
@@ -210,8 +213,15 @@ For reproducibility, all cases fix Paxos slots to 131072 and max_ops to
 90000 (the previously hardware-tested 16 MiB-per-replica registration).
 These logs are nonrecycling; if a case exceeds the fixed operation/log
 budget, it must FAIL and be reported, not silently truncate its elapsed time.
+The prior reservation of one extra Paxos log slot **per configured key**
+has been replaced by a fixed 64-slot PREPARE headroom check: keys that
+receive no JOINs must not consume log history. The coordinator still
+checks every JOIN and PREPARE against actual remaining log capacity.
+For 100000 keys with 131072 Paxos slots, the MN4 data + owner MR
+has 331104 8-byte slots (~2.53 MiB); each Paxos replica remains at 16 MiB.
+Longer tests still need proper log reuse, which is separate future work.
 
-### Stage 1: 14 safety smoke trials (8 total workers)
+### Stage 1: 22 safety smoke trials (8 total workers)
 
 On the experiment controller (Node 4):
 
@@ -221,29 +231,29 @@ python3 tools/apt/run_suite.py \
   --suite tools/apt/suites/live_key_scaling_smoke.json --fail-fast
 ~~~
 
-These trials cover one lock and 16/256/4096 keys (both uniform and Zipf
-on multi-key populations) with two repetitions, 100 ms warmup, 500 ms
-measurement and ownership probes enabled. Before a larger sweep, verify
+These trials cover one lock and 16/256/4096/16384/100000 keys
+(both uniform and Zipf on multi-key populations), with two repetitions,
+100 ms warmup, 500 ms measurement and ownership probes enabled. Before a larger sweep, verify
 all trials PASS with zero ownership violations.
 
-### Stage 2: 39-case 8-worker key-count curve
+### Stage 2: 51-case 8-worker key-count curve
 
 ~~~bash
 python3 tools/apt/run_suite.py \
   --suite tools/apt/suites/live_key_scaling_8.json --fail-fast
 ~~~
 
-Lock counts are **1, 4, 16, 64, 256, 1000, and 4096**; for all counts
-greater than one, compare uniform with Zipf(alpha=0.99). Each has three
-repetitions and a 1000 ms measured interval (zero warmup), giving
-13 key-count/distribution configurations times three trials. Eight
+Lock counts are **1, 4, 16, 64, 256, 1000, 4096, 16384, and 100000**;
+for all counts greater than one, compare uniform with Zipf(alpha=0.99).
+Each has three repetitions and a 1000 ms measured interval (zero
+warmup), giving 17 key-count/distribution configurations times three trials. Eight
 total CN workers = 4 workers per CN.
 
 This is a **scaling survey**, not the prior 2-second matched DecLock
 measurement. Do not plot its throughput alongside the 2-second historical
 samples without marking the differing measurement duration.
 
-### Stage 3: optional 39-case 16-worker curve
+### Stage 3: optional 51-case 16-worker curve
 
 ~~~bash
 python3 tools/apt/run_suite.py \

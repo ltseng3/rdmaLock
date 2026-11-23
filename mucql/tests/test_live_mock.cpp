@@ -6,6 +6,23 @@ using namespace mucql_live;
 int main(int argc,char**argv){
   std::signal(SIGALRM,[](int){std::_Exit(22);});alarm(35);
   try{
+    // A 100,000-key population must be independent of the 131,072-slot
+    // accepted log and its unique grant/release marker address space.
+    Options large{};
+    large.workers=2;large.lock_count=kMaxLocks;
+    large.paxos_slots=131072;large.max_ops=90000;
+    validate(large);
+    if(!join_log_has_room(0,1,large.paxos_slots) ||
+       !join_log_has_room(1,1,large.paxos_slots) ||
+       join_log_has_room(large.paxos_slots-kPrepareLogReserve,1,large.paxos_slots) ||
+       join_log_has_room(large.paxos_slots+1,1,large.paxos_slots) ||
+       data_slot(large,kLockBase+kMaxLocks-1)+1!=owner_slot(large,kLockBase) ||
+       owner_slot(large,kLockBase+kMaxLocks-1)>=release_slots(large))
+      fail("100000-key release/log address bounds broken");
+    large.lock_count=kMaxLocks+1;
+    bool rejected=false;
+    try{validate(large);}catch(const std::exception&){rejected=true;}
+    if(!rejected)fail("100001-key options accepted despite upper bound");
     // Real TCP loopback test for both sides of the admission transport.
     // The remaining integration test exercises the same code with mock RNICs.
     int listenfd=listen_tcp(0);

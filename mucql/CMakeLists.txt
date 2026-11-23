@@ -176,4 +176,16 @@ set_tests_properties(mucql_live_hot_raw mucql_live_hot_optimized
   set_tests_properties(mucql_live_control_idle_recv_mock
       PROPERTIES ENVIRONMENT "MUCQL_RX_IDLE_US=5"
                  TIMEOUT 30 RUN_SERIAL TRUE)
+
+  # Large logical key populations reuse the fixed-sized accepted log budget.
+  # Both variants verify disjoint per-key data/owner regions and all release
+  # markers using mock RDMA; no log ring reclamation is enabled.
+  add_test(NAME mucql_live_rdma_100k_uniform_mock
+      COMMAND mucql_live_mock_test 4 100000 1 1 1 2 0 1)
+  add_test(NAME mucql_live_rdma_100k_zipf_mock
+      COMMAND mucql_live_mock_test 4 100000 1 1 1 2 1 1)
+  set_tests_properties(mucql_live_rdma_100k_uniform_mock
+      mucql_live_rdma_100k_zipf_mock
+      PROPERTIES ENVIRONMENT "MUCQL_CN_TRANSPORT=rdma;MUCQL_HANDOFF_PRECONNECT=0"
+                 TIMEOUT 45 RUN_SERIAL TRUE)
 endif()

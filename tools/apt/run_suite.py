@@ -81,7 +81,7 @@ def expand_live(spec, topology, suite_seed, start_id):
         raise ValueError('LIVE needs at least two dedicated CNs')
     cn_counts = [require_int(x, 2, len(topology['clients']), 'cn_counts') for x in cn_values]
     workers = axis('workers_per_cn', 1, 1, 16)
-    locks = axis('locks', 1, 1, 4096)
+    locks = axis('locks', 1, 1, 100000)
     probes = axis('probes', 1, 0, 1)
     work = axis('work_ns', 0, 0, 1000000000)
     data_ops = axis('data_ops', 1, 1, 32)

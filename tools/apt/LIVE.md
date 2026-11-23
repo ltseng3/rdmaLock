@@ -190,6 +190,65 @@ grep -R -E 'accepted MR registration|RDMA acceptor session|RDMA Paxos provisioni
     mn1 mn2 mn3
 \`\`\`
 
+## CPU polling and early handoff connection experiment
+
+This is **MuCQL-only tuning**, not a DecLock benchmark or a demonstrated
+hardware performance improvement. The completed 60-case 2-second hardware
+baseline on revision 8479550 reported these median successful operations/s:
+
+| Active writers | RDMA writes | raw | full_no_join | full |
+| --- | ---: | ---: | ---: | ---: |
+| 8 | 1 | 19379.5 | 18883 | 17884.5 |
+| 8 | 32 | 8814.5 | 9019 | 9047 |
+| 16 | 1 | 15857 | 14983.5 | 11295 |
+| 16 | 32 | 7153 | 6793 | 6487 |
+
+Two independently testable changes preserve the existing replicated
+JOIN/PREPARE decisions and handoff certificate.
+
+* **Early RC handoff connection:** on HandoffReady (which requires a
+  committed PREPARE), the predecessor opens the successor's RDMA RC
+  connection before waiting for its own release. The one-sided CAS into
+  the successor inbox still waits for locally confirmed retirement.
+  This behavior is controlled by handoff_preconnect (default 1, old 0).
+* **CPU backoff on idle polling:** optional microsecond sleep every 32
+  unsuccessful CQ RECV polls (rx_idle_us 0..100) and optional sleep
+  every 32 unsuccessful predecessor-inbox polls (handoff_idle_us
+  0..100). Both default to 0, the original yield-only behavior.
+  SEND and Paxos phase-2 CQ paths are unaffected.
+
+Per-trial configuration is propagated as MUCQL_RX_IDLE_US,
+MUCQL_HANDOFF_IDLE_US and MUCQL_HANDOFF_PRECONNECT. PASS output
+and CSV grouping include all three parameters, so distinct polling
+strategies cannot be silently pooled. All release-marker validation
+and optional mutual-exclusion probes are retained.
+
+Run the **28-case safety smoke** first on Node 4:
+
+~~~bash
+cd ~/rdmaLock && git pull --ff-only
+python3 tools/apt/run_suite.py --suite tools/apt/suites/live_hot_poll_smoke.json --fail-fast
+~~~
+
+Only if every case passes, run the 57-case, two-second tuning suite:
+
+~~~bash
+python3 tools/apt/run_suite.py --suite tools/apt/suites/live_hot_poll_tuning.json --fail-fast
+~~~
+
+Measure changes in median throughput, P99 latency and P99 handoff wait for
+16 writers / one RDMA WRITE and 8 writers / 32 RDMA WRITEs. Do not assume
+that a nonzero sleep setting helps: Linux timer granularity might
+increase admission latency. Preserve slow PASS trials, and do not
+combine rows from differently tuned configurations. If the backoff
+policy reduces throughput, the 0 setting restores original behavior.
+
+Numerical comparison caveat: DecLock Figure 12 uses up to 256 clients
+across eight CNs with 100 Gbps ConnectX-4 RNICs, with default
+100,000 locks and 50% reads. Our setup has two CNs, mlx4 RNICs,
+one hot exclusively written lock and a replicated Paxos log.
+Absolute throughput numbers are **not directly comparable**.
+
 ## DecLock-style exclusive critical-section comparison
 
 The live worker now supports **\`data_ops\` = 1..32**, exactly that many

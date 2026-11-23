@@ -157,4 +157,23 @@ set_tests_properties(mucql_live_hot_raw mucql_live_hot_optimized
   set_tests_properties(mucql_live_rdma_release_bind_retry_mock
       PROPERTIES ENVIRONMENT "MUCQL_CN_TRANSPORT=rdma;MUCQL_TEST_RELEASE_BIND_DELAY_MS=60"
                  TIMEOUT 45 RUN_SERIAL TRUE)
+  add_test(NAME mucql_live_rdma_handoff_preconnect_mock
+      COMMAND mucql_live_mock_test 16 1 1 1 1 2 0 1)
+  set_tests_properties(mucql_live_rdma_handoff_preconnect_mock
+      PROPERTIES ENVIRONMENT "MUCQL_CN_TRANSPORT=rdma;MUCQL_HANDOFF_PRECONNECT=1"
+                 TIMEOUT 45 RUN_SERIAL TRUE)
+  add_test(NAME mucql_live_rdma_legacy_handoff_mock
+      COMMAND mucql_live_mock_test 4 1 1 1 1 2 0 1)
+  set_tests_properties(mucql_live_rdma_legacy_handoff_mock
+      PROPERTIES ENVIRONMENT "MUCQL_CN_TRANSPORT=rdma;MUCQL_HANDOFF_PRECONNECT=0"
+                 TIMEOUT 45 RUN_SERIAL TRUE)
+  add_test(NAME mucql_live_rdma_idle_poll_mock
+      COMMAND mucql_live_mock_test 16 1 1 1 1 2 0 1)
+  set_tests_properties(mucql_live_rdma_idle_poll_mock
+      PROPERTIES ENVIRONMENT "MUCQL_CN_TRANSPORT=rdma;MUCQL_RX_IDLE_US=5;MUCQL_HANDOFF_IDLE_US=5;MUCQL_HANDOFF_PRECONNECT=1"
+                 TIMEOUT 45 RUN_SERIAL TRUE)
+  add_test(NAME mucql_live_control_idle_recv_mock COMMAND mucql_live_control_mock_test)
+  set_tests_properties(mucql_live_control_idle_recv_mock
+      PROPERTIES ENVIRONMENT "MUCQL_RX_IDLE_US=5"
+                 TIMEOUT 30 RUN_SERIAL TRUE)
 endif()

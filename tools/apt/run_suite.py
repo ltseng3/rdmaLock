@@ -39,7 +39,8 @@ REPO_URL = 'https://github.com/ltseng3/rdmaLock.git'
 SUPPORTED = {'ordering_micro', 'prepared_e2e', 'live_e2e'}
 COLUMNS = ['case', 'scenario', 'trial', 'kind', 'measurement_scope', 'comparable_to_declock',
            'commit', 'cn_nodes', 'worker_processes', 'positions', 'batch', 'probe',
-           'work_ns', 'data_ops', 'data_size_bytes', 'read_ratio', 'data_writes_measured',
+           'work_ns', 'data_ops', 'rx_idle_us', 'handoff_idle_us', 'handoff_preconnect',
+           'data_size_bytes', 'read_ratio', 'data_writes_measured',
            'completed', 'verified_markers', 'violations',
            'ordering_seconds', 'handoff_seconds', 'goodput_ops_per_sec',
            'including_ordering_ops_per_sec', 'ordered_entries_per_sec', 'status',
@@ -84,6 +85,9 @@ def expand_live(spec, topology, suite_seed, start_id):
     probes = axis('probes', 1, 0, 1)
     work = axis('work_ns', 0, 0, 1000000000)
     data_ops = axis('data_ops', 1, 1, 32)
+    rx_idle = axis('rx_idle_us', 0, 0, 100)
+    handoff_idle = axis('handoff_idle_us', 0, 0, 100)
+    preconnect = axis('handoff_preconnect', 1, 0, 1)
     distributions = spec.get('distributions', ['uniform'])
     if not isinstance(distributions, list) or not distributions or any(x not in ('uniform', 'zipf_0.99') for x in distributions):
         raise ValueError('LIVE distributions must contain uniform or zipf_0.99')
@@ -95,16 +99,20 @@ def expand_live(spec, topology, suite_seed, start_id):
     if max_ops > slots - slots//64:
         raise ValueError('LIVE max_ops must leave safety headroom in consensus log')
     cases=[]
-    combinations = itertools.product(profiles, transports, cn_counts, workers, locks, distributions, probes, work, data_ops)
-    for pname, transport, cn, wpc, lock_count, distribution, probe, ns, shots in combinations:
+    combinations = itertools.product(profiles, transports, cn_counts, workers, locks,
+                                     distributions, probes, work, data_ops,
+                                     rx_idle, handoff_idle, preconnect)
+    for pname, transport, cn, wpc, lock_count, distribution, probe, ns, shots, rx, hi, pc in combinations:
         if cn*wpc>64 or any(wpc>n.get('cores', 8) for n in topology['clients'][:cn]):
             raise ValueError('LIVE workers exceed core budget or 64 worker processes')
         for trial in range(1, repetitions+1):
             case=dict(name=name,kind='live_e2e',trial=trial,profile=pname,transport=transport,
                 cn_count=cn,workers_per_cn=wpc,locks=lock_count,distribution=distribution,
-                probe=probe,work_ns=ns,data_ops=shots,seed=seed,warmup_ms=warmup,measure_ms=measurement,
+                probe=probe,work_ns=ns,data_ops=shots,rx_idle_us=rx,
+                handoff_idle_us=hi,handoff_preconnect=pc,
+                seed=seed,warmup_ms=warmup,measure_ms=measurement,
                 paxos_slots=slots,max_ops=max_ops,positions=topology['benchmark']['positions'],batch=1)
-            case['id']=f'{start_id+len(cases):04d}-{name}-{pname}-{transport}-d{shots}-t{trial}'
+            case['id']=f'{start_id+len(cases):04d}-{name}-{pname}-{transport}-d{shots}-rx{rx}-hi{hi}-pc{pc}-t{trial}'
             cases.append(case)
     return cases
 
@@ -189,6 +197,8 @@ def case_topology(original, case, ballot):
         doc['benchmark'].update(mode='live', cn_transport=case['transport'], **p, paxos_slots=case['paxos_slots'],
             max_ops=case['max_ops'], warmup_ms=case['warmup_ms'],
             measure_ms=case['measure_ms'], locks=case['locks'], data_ops=case['data_ops'],
+            rx_idle_us=case['rx_idle_us'],handoff_idle_us=case['handoff_idle_us'],
+            handoff_preconnect=case['handoff_preconnect'],
             zipf=int(case['distribution']=='zipf_0.99'), seed=case['seed'])
     cluster.validate(doc)
     return doc
@@ -205,7 +215,8 @@ def extract_live(text):
             'actual_join_batch_mean','prepare_records','goodput_ops_per_sec',
             'latency_p50_ns','latency_p95_ns','latency_p99_ns',
             'admission_p50_ns','admission_p99_ns','handoff_wait_p99_ns','transport',
-            'data_ops','data_size_bytes','read_ratio','data_writes_measured')
+            'data_ops','data_size_bytes','read_ratio','data_writes_measured',
+            'rx_idle_us','handoff_idle_us','handoff_preconnect')
     if any(key not in result for key in needed):
         raise ValueError('incomplete LIVE_E2E output')
     if result['status']!='PASS' or result['scope']!='live_steady_state':
@@ -215,6 +226,9 @@ def extract_live(text):
         int(result['measured'])<1 or int(result['violations'])!=0 or
         int(result['data_ops']) not in range(1,33) or
         int(result['data_size_bytes'])!=8 or int(result['read_ratio'])!=0 or
+        int(result['rx_idle_us']) not in range(101) or
+        int(result['handoff_idle_us']) not in range(101) or
+        int(result['handoff_preconnect']) not in (0,1) or
         int(result['data_writes_measured'])!=int(result['measured'])*int(result['data_ops'])):
         raise ValueError('LIVE completion/marker/ownership mismatch')
     for key in ('goodput_ops_per_sec','actual_join_batch_mean'):
@@ -385,7 +399,10 @@ def benchmark(ex, case, topology, commit, session, run_root, ballot, timeout):
                 int(summary['measure_ms']) != case['measure_ms'] or
                 int(summary['warmup_ms']) != case['warmup_ms'] or
                 summary['transport'] != case['transport'] or
-                int(summary['data_ops']) != case['data_ops']):
+                int(summary['data_ops']) != case['data_ops'] or
+                int(summary['rx_idle_us']) != case['rx_idle_us'] or
+                int(summary['handoff_idle_us']) != case['handoff_idle_us'] or
+                int(summary['handoff_preconnect']) != case['handoff_preconnect']):
                 raise ValueError('LIVE result does not match request')
             for k in ('join_aggregate','phase2_window','prepare_range','lookahead','replenish_threshold','batch_wait_us'):
                 if int(summary[k]) != doc['benchmark'][k]:
@@ -402,7 +419,10 @@ def benchmark(ex, case, topology, commit, session, run_root, ballot, timeout):
                    positions=case['positions'],batch=case['batch'],probe=case['probe'],work_ns=case['work_ns'],status='PASS')
         if case['kind'] == 'live_e2e':
             row.update(profile=case['profile'],transport=case['transport'],lock_count=case['locks'],distribution=case['distribution'],
-                data_ops=case['data_ops'], data_size_bytes=8, read_ratio=0,
+                data_ops=case['data_ops'],rx_idle_us=case['rx_idle_us'],
+                handoff_idle_us=case['handoff_idle_us'],
+                handoff_preconnect=case['handoff_preconnect'],
+                data_size_bytes=8, read_ratio=0,
                 warmup_ms=case['warmup_ms'],measure_ms=case['measure_ms'],seed=case['seed'],
                 paxos_slots=case['paxos_slots'],max_ops=case['max_ops'])
             for k in ('join_aggregate','phase2_window','prepare_range','lookahead','replenish_threshold',
@@ -457,13 +477,15 @@ def summarize(rows, path):
         key = (row['kind'], row.get('scenario',''), row.get('profile',''), row.get('transport',''), row['cn_nodes'],
                row['worker_processes'], row['positions'], row['batch'], row['probe'], row['work_ns'],
                row.get('lock_count',''), row.get('distribution',''), row.get('data_ops',''),
-                row.get('data_size_bytes',''), row.get('read_ratio',''), row.get('warmup_ms',''),
+                row.get('rx_idle_us',''),row.get('handoff_idle_us',''),
+                row.get('handoff_preconnect',''),row.get('data_size_bytes',''), row.get('read_ratio',''), row.get('warmup_ms',''),
                row.get('measure_ms',''), row.get('seed',''))
         groups.setdefault(key, []).append(float(row[field]))
     with path.open('w', newline='') as fp:
         w=csv.writer(fp)
         w.writerow(['kind','scenario','profile','transport','cn_nodes','workers','positions','batch','probe',
-                    'work_ns','locks','distribution','data_ops','data_size_bytes','read_ratio','warmup_ms','measure_ms','seed',
+                    'work_ns','locks','distribution','data_ops','rx_idle_us','handoff_idle_us',
+                    'handoff_preconnect','data_size_bytes','read_ratio','warmup_ms','measure_ms','seed',
                     'trials','median_ops_per_sec','min_ops_per_sec','max_ops_per_sec','comparable_to_declock'])
         for key,values in sorted(groups.items(),key=lambda p:str(p[0])):
             w.writerow([*key,len(values),f'{statistics.median(values):.2f}',
@@ -482,12 +504,14 @@ def write_ablations(rows, path):
             continue
         key=(row.get('scenario'),row.get('transport'),row.get('cn_nodes'),row.get('worker_processes'),
              row.get('lock_count'),row.get('distribution'),row.get('work_ns'),row.get('data_ops'),
+             row.get('rx_idle_us'),row.get('handoff_idle_us'),row.get('handoff_preconnect'),
              row.get('data_size_bytes'),row.get('read_ratio'),row.get('probe'),row.get('warmup_ms'),row.get('measure_ms'),row.get('seed'))
         groups.setdefault(key,{})[(row.get('profile'),row['trial'])]=row
     with path.open('w',newline='') as f:
         writer=csv.writer(f)
         writer.writerow(['scenario','transport','cn_nodes','workers','locks','distribution','work_ns',
-            'data_ops','data_size_bytes','read_ratio','probe',
+            'data_ops','rx_idle_us','handoff_idle_us','handoff_preconnect',
+            'data_size_bytes','read_ratio','probe',
             'warmup_ms','measure_ms','seed','effect','control','treatment',
             'matched_trials','control_median_ops','treatment_median_ops',
             'median_speedup','median_gain_pct','bootstrap95_low','bootstrap95_high','status'])
@@ -534,7 +558,8 @@ def failure_row(case, commit, exc):
     if case['kind']=='live_e2e':
         row.update(profile=case['profile'],transport=case['transport'],lock_count=case['locks'],
                    distribution=case['distribution'],data_ops=case['data_ops'],
-                   data_size_bytes=8,read_ratio=0,warmup_ms=case['warmup_ms'],
+                   rx_idle_us=case['rx_idle_us'],handoff_idle_us=case['handoff_idle_us'],
+                   handoff_preconnect=case['handoff_preconnect'],data_size_bytes=8,read_ratio=0,warmup_ms=case['warmup_ms'],
                    measure_ms=case['measure_ms'],seed=case['seed'],
                    paxos_slots=case['paxos_slots'],max_ops=case['max_ops'],
                    **profile(case['profile']))
@@ -566,7 +591,10 @@ def main():
         print(f'  {c["id"]} {c["kind"]} positions={c["positions"]} batch={c["batch"]} '
               f'CN={c["cn_count"]} workers/CN={c["workers_per_cn"]} probe={c["probe"]}'
               f' profile={c.get("profile", "-")} transport={c.get("transport", "-")}'
-              f' locks={c.get("locks", "-")} data_ops={c.get("data_ops","-")}',flush=True)
+              f' locks={c.get("locks", "-")} data_ops={c.get("data_ops","-")}'
+              f' rx_idle_us={c.get("rx_idle_us","-")}'
+              f' handoff_idle_us={c.get("handoff_idle_us","-")}'
+              f' preconnect={c.get("handoff_preconnect","-")}',flush=True)
     print('Measurement families: live CN-admitted MuCQL, prepared-handoff, or ordering-only. '
           'DecLock adapter not yet available; do not present these as head-to-head curves.',flush=True)
     if args.dry_run:

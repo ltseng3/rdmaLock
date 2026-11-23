@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cerrno>
 #include <cstring>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -50,12 +51,24 @@ void recv_all(int fd,void* dst,size_t n){
 uint32_t psn(){
   return uint32_t(std::chrono::steady_clock::now().time_since_epoch().count())&0xffffff;
 }
+// Optional control receive backoff: by default retain the original low-latency
+// CQ poll. A bounded yield+sleep policy can release CPU on oversubscribed CNs.
+uint32_t idle_recv_us(){
+  const char* s=std::getenv("MUCQL_RX_IDLE_US");
+  if(!s)return 0;
+  if(!*s)fail("MUCQL_RX_IDLE_US must be 0..100");
+  errno=0;char* end=nullptr;
+  unsigned long n=std::strtoul(s,&end,10);
+  if(errno||*end||n>100)fail("MUCQL_RX_IDLE_US must be 0..100");
+  return uint32_t(n);
+}
 }
 
 struct LiveControlChannel::Impl {
   int fd;
   bool rdma;
   size_t size;
+  uint32_t rx_idle_us{};
   std::atomic<bool> stopping{false};
   ibv_context* ctx{};
   ibv_pd* pd{};
@@ -69,7 +82,7 @@ struct LiveControlChannel::Impl {
   uint8_t port;
   std::vector<uint8_t> send_buf,recv_buf;
   explicit Impl(int f,const std::string& device,uint8_t p,bool use_rdma,size_t message_size)
-    :fd(f),rdma(use_rdma),size(message_size),port(p){
+    :fd(f),rdma(use_rdma),size(message_size),rx_idle_us(idle_recv_us()),port(p){
     if(size==0||size>4096||port<1||port>2)fail("invalid control-frame size or port");
     if(!rdma)return;
     // Destructor is safe on every partial-construction failure.
@@ -165,6 +178,7 @@ struct LiveControlChannel::Impl {
   }
   ibv_wc poll(ibv_cq* cq,const char* kind){
     auto start=std::chrono::steady_clock::now();
+    uint32_t misses=0;
     for(;;){
       if(stopping.load(std::memory_order_relaxed))fail(std::string(kind)+" cancelled");
       ibv_wc wc{};
@@ -177,7 +191,10 @@ struct LiveControlChannel::Impl {
       // Protect against hung QPs, but allow receiver to idle between requests.
       if(cq==send_cq&&std::chrono::steady_clock::now()-start>std::chrono::seconds(3))
         fail("SEND CQ timeout");
-      std::this_thread::yield();
+      if(cq==recv_cq && rx_idle_us>0 && (++misses%32)==0)
+        std::this_thread::sleep_for(std::chrono::microseconds(rx_idle_us));
+      else
+        std::this_thread::yield();
     }
   }
 };

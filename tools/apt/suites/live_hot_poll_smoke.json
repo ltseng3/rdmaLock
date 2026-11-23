@@ -1,0 +1,197 @@
+{
+  "seed": 2026,
+  "shuffle": true,
+  "tests": [
+    {
+      "name": "hot-rx16-smoke",
+      "kind": "live_e2e",
+      "cn_counts": [
+        2
+      ],
+      "locks": [
+        1
+      ],
+      "distributions": [
+        "uniform"
+      ],
+      "work_ns": [
+        0
+      ],
+      "transports": [
+        "rdma"
+      ],
+      "paxos_slots": 131072,
+      "max_ops": 90000,
+      "seed": 2026,
+      "profiles": [
+        "raw",
+        "full_no_join",
+        "full"
+      ],
+      "workers_per_cn": [
+        8
+      ],
+      "data_ops": [
+        1
+      ],
+      "probes": [
+        1
+      ],
+      "rx_idle_us": [
+        0,
+        5
+      ],
+      "handoff_idle_us": [
+        0
+      ],
+      "handoff_preconnect": [
+        1
+      ],
+      "warmup_ms": 100,
+      "measure_ms": 500,
+      "repetitions": 2
+    },
+    {
+      "name": "hot-wait16-smoke",
+      "kind": "live_e2e",
+      "cn_counts": [
+        2
+      ],
+      "locks": [
+        1
+      ],
+      "distributions": [
+        "uniform"
+      ],
+      "work_ns": [
+        0
+      ],
+      "transports": [
+        "rdma"
+      ],
+      "paxos_slots": 131072,
+      "max_ops": 90000,
+      "seed": 2026,
+      "profiles": [
+        "raw",
+        "full_no_join",
+        "full"
+      ],
+      "workers_per_cn": [
+        8
+      ],
+      "data_ops": [
+        1
+      ],
+      "probes": [
+        1
+      ],
+      "rx_idle_us": [
+        5
+      ],
+      "handoff_idle_us": [
+        5
+      ],
+      "handoff_preconnect": [
+        1
+      ],
+      "warmup_ms": 100,
+      "measure_ms": 500,
+      "repetitions": 2
+    },
+    {
+      "name": "hot-rx8-32-smoke",
+      "kind": "live_e2e",
+      "cn_counts": [
+        2
+      ],
+      "locks": [
+        1
+      ],
+      "distributions": [
+        "uniform"
+      ],
+      "work_ns": [
+        0
+      ],
+      "transports": [
+        "rdma"
+      ],
+      "paxos_slots": 131072,
+      "max_ops": 90000,
+      "seed": 2026,
+      "profiles": [
+        "raw",
+        "full"
+      ],
+      "workers_per_cn": [
+        4
+      ],
+      "data_ops": [
+        32
+      ],
+      "probes": [
+        1
+      ],
+      "rx_idle_us": [
+        0,
+        5
+      ],
+      "handoff_idle_us": [
+        0
+      ],
+      "handoff_preconnect": [
+        1
+      ],
+      "warmup_ms": 100,
+      "measure_ms": 500,
+      "repetitions": 2
+    },
+    {
+      "name": "hot-preconnect-smoke",
+      "kind": "live_e2e",
+      "cn_counts": [
+        2
+      ],
+      "locks": [
+        1
+      ],
+      "distributions": [
+        "uniform"
+      ],
+      "work_ns": [
+        0
+      ],
+      "transports": [
+        "rdma"
+      ],
+      "paxos_slots": 131072,
+      "max_ops": 90000,
+      "seed": 2026,
+      "profiles": [
+        "full_no_join"
+      ],
+      "workers_per_cn": [
+        8
+      ],
+      "data_ops": [
+        1
+      ],
+      "probes": [
+        1
+      ],
+      "rx_idle_us": [
+        0
+      ],
+      "handoff_idle_us": [
+        0
+      ],
+      "handoff_preconnect": [
+        0
+      ],
+      "warmup_ms": 100,
+      "measure_ms": 500,
+      "repetitions": 2
+    }
+  ]
+}

@@ -72,6 +72,11 @@ def validate(doc):
         shots=bench.get("data_ops",1)
         if type(shots) is not int or shots<1 or shots>32:
             raise ValueError("live data_ops must be an integer 1..32 (8-byte completed RDMA WRITEs)")
+        for knob,limit in (("rx_idle_us",100),("handoff_idle_us",100),
+                           ("handoff_preconnect",1)):
+            value=bench.get(knob,1 if knob=="handoff_preconnect" else 0)
+            if type(value) is not int or not 0<=value<=limit:
+                raise ValueError(f"live {knob} must be integer 0..{limit}")
         for name, lo, hi in (("max_ops", total, 1_000_000), ("paxos_slots", 4096, 1_000_000),
                              ("locks", 1, 4096), ("join_aggregate", 1, 32),
                              ("phase2_window", 1, 32), ("prepare_range", 1, 128),
@@ -209,6 +214,9 @@ def main():
         env["MUCQL_PAXOS_SLOTS"] = str(doc["benchmark"]["paxos_slots"])
         env["MUCQL_CN_TRANSPORT"] = doc["benchmark"].get("cn_transport","rdma")
         env["MUCQL_DATA_OPS"] = str(doc["benchmark"].get("data_ops",1))
+        env["MUCQL_RX_IDLE_US"] = str(doc["benchmark"].get("rx_idle_us",0))
+        env["MUCQL_HANDOFF_IDLE_US"] = str(doc["benchmark"].get("handoff_idle_us",0))
+        env["MUCQL_HANDOFF_PRECONNECT"] = str(doc["benchmark"].get("handoff_preconnect",1))
     for line in cmds:
         print("MUCQL_IB_PORT=" + str(doc["ib_port"]) + " " + shlex.join(line), flush=True)
     if args.action == "print":

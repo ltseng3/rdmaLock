@@ -75,6 +75,10 @@ uint64_t number(const char* s,uint64_t lo,uint64_t hi,const std::string& name){
   try{size_t end=0;std::string a=s;auto n=std::stoull(a,&end);if(end!=a.size()||n<lo||n>hi)fail("bad "+name);return n;}
   catch(const std::exception&){fail("bad "+name);}
 }
+uint64_t env_number(const char* name,uint64_t default_value,uint64_t high){
+  const char* s=std::getenv(name);
+  return s?number(s,0,high,name):default_value;
+}
 void host_to(char* dst,const std::string& host){if(host.empty()||host.size()>63)fail("host too long");std::memset(dst,0,64);std::memcpy(dst,host.c_str(),host.size());}
 std::string host_of(const char* p){return std::string(p,strnlen(p,64));}
 std::pair<std::string,uint16_t> endpoint(const std::string& s){auto i=s.rfind(':');
@@ -178,6 +182,9 @@ int coordinator(int argc,char**argv){
   if(const char* s=getenv("MUCQL_DATA_OPS"))o.data_ops=number(s,1,32,"data_ops");
   validate(o);
   const bool control_rdma=rdma_admission();
+  const auto rx_idle_us=env_number("MUCQL_RX_IDLE_US",0,100);
+  const auto handoff_idle_us=env_number("MUCQL_HANDOFF_IDLE_US",0,100);
+  const auto handoff_preconnect=env_number("MUCQL_HANDOFF_PRECONNECT",1,1);
   int listenfd=listen_tcp(port);
   std::cout<<"LIVE coordinator listening tcp="<<port<<" workers="<<o.workers
            <<" locks="<<o.lock_count<<" max_ops="<<o.max_ops<<" transport="<<(control_rdma?"rdma":"tcp")<<std::endl;
@@ -364,6 +371,9 @@ int coordinator(int argc,char**argv){
       <<" admission_p99_ns="<<percentile(admission,0.99)
       <<" handoff_wait_p99_ns="<<percentile(waits,0.99)
       <<" goodput_ops_per_sec="<<1000.0*measured/o.measure_ms
+      <<" rx_idle_us="<<rx_idle_us
+      <<" handoff_idle_us="<<handoff_idle_us
+      <<" handoff_preconnect="<<handoff_preconnect
       <<" transport="<<(control_rdma?"rdma":"tcp")
       <<" probe="<<o.probe<<" work_ns="<<o.work_ns<<std::endl;
     for(size_t w=0;w<o.workers;w++)send_to(w,message(Finish));
@@ -413,6 +423,10 @@ int worker(int argc,char**argv){
   send_exact(fd,&h,sizeof(h));
   Config cfg{};recv_exact(fd,&cfg,sizeof(cfg));
   const bool control_rdma=rdma_admission();
+  const auto rx_idle_us=env_number("MUCQL_RX_IDLE_US",0,100);
+  const auto handoff_idle_us=env_number("MUCQL_HANDOFF_IDLE_US",0,100);
+  const bool handoff_preconnect=env_number("MUCQL_HANDOFF_PRECONNECT",1,1)!=0;
+  (void)rx_idle_us; // LiveControlChannel reads the same validated setting.
   if(cfg.magic!=kMagic||cfg.self!=id||cfg.workers>kMaxWorkers||cfg.workers<2||
      cfg.paxos_slots!=slots||cfg.lock_count<1||cfg.lock_count>4096||
      cfg.transport!=(control_rdma?1ULL:0ULL))fail("bad LIVE config/slot/transport mismatch");
@@ -451,11 +465,20 @@ int worker(int argc,char**argv){
         if(!stream_error.empty())break;
         if(successors.empty()){if(finished)break;continue;}
         successor=successors.front();successors.pop_front();
-        cv.wait(lock,[&]{return !stream_error.empty()||retired.count(successor.predecessor_id);});
-        if(!stream_error.empty())break;
       }
       if(successor.client<1||successor.client>cfg.workers)fail("bad successor client");
       auto& remote=outgoing[successor.client];
+      // Pre-connect as soon as the committed PREPARE reveals the successor.
+      // This is only bootstrap work: the CAS is still forbidden until the
+      // predecessor has retired and its release marker has completed.
+      if(handoff_preconnect && !remote)
+        remote=std::make_unique<VerbsReleaseClient>(host_of(peers[successor.client-1].ip),
+          uint16_t(peers[successor.client-1].port),release_opts(device,slots));
+      {
+        std::unique_lock<std::mutex> lock(mu);
+        cv.wait(lock,[&]{return !stream_error.empty()||retired.count(successor.predecessor_id);});
+        if(!stream_error.empty())break;
+      }
       if(!remote)remote=std::make_unique<VerbsReleaseClient>(host_of(peers[successor.client-1].ip),
         uint16_t(peers[successor.client-1].port),release_opts(device,slots));
       auto old=remote->compare_exchange(successor.grant_id,0,successor.grant_id);
@@ -498,12 +521,16 @@ int worker(int argc,char**argv){
       if(t.position==0){if(!client.activate_start(t,true,EndlessClock{}))fail("head start rejected");}
       else{
         auto wait_from=ClockType::now();
+        uint32_t handoff_polls=0;
         for(;;){auto current=inbox->slot_value(t.grant_id);
           if(current==t.grant_id)break;
           if(current!=0)fail("stale/foreign CAS in inbox");
           {std::lock_guard<std::mutex> lock(mu);if(!stream_error.empty())fail(stream_error);}
           if(ClockType::now()-wait_from>std::chrono::seconds(30))fail("handoff starvation timeout");
-          std::this_thread::yield();}
+          if(handoff_idle_us && (++handoff_polls%32)==0)
+            std::this_thread::sleep_for(std::chrono::microseconds(handoff_idle_us));
+          else
+            std::this_thread::yield();}
         handoff_wait_ns=std::chrono::duration_cast<ns>(ClockType::now()-wait_from).count();
         if(!client.activate_handoff({t,t.predecessor_id,t.position-1},EndlessClock{}))fail("handoff activation rejected");
       }

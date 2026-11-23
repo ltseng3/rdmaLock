@@ -1,0 +1,199 @@
+{
+  "seed": 2026,
+  "shuffle": true,
+  "tests": [
+    {
+      "name": "hot-rx16",
+      "kind": "live_e2e",
+      "cn_counts": [
+        2
+      ],
+      "locks": [
+        1
+      ],
+      "distributions": [
+        "uniform"
+      ],
+      "work_ns": [
+        0
+      ],
+      "transports": [
+        "rdma"
+      ],
+      "paxos_slots": 131072,
+      "max_ops": 90000,
+      "seed": 2026,
+      "profiles": [
+        "raw",
+        "full_no_join",
+        "full"
+      ],
+      "workers_per_cn": [
+        8
+      ],
+      "data_ops": [
+        1
+      ],
+      "probes": [
+        0
+      ],
+      "rx_idle_us": [
+        0,
+        5,
+        20
+      ],
+      "handoff_idle_us": [
+        0
+      ],
+      "handoff_preconnect": [
+        1
+      ],
+      "warmup_ms": 0,
+      "measure_ms": 2000,
+      "repetitions": 3
+    },
+    {
+      "name": "hot-rx8-32",
+      "kind": "live_e2e",
+      "cn_counts": [
+        2
+      ],
+      "locks": [
+        1
+      ],
+      "distributions": [
+        "uniform"
+      ],
+      "work_ns": [
+        0
+      ],
+      "transports": [
+        "rdma"
+      ],
+      "paxos_slots": 131072,
+      "max_ops": 90000,
+      "seed": 2026,
+      "profiles": [
+        "raw",
+        "full"
+      ],
+      "workers_per_cn": [
+        4
+      ],
+      "data_ops": [
+        32
+      ],
+      "probes": [
+        0
+      ],
+      "rx_idle_us": [
+        0,
+        5,
+        20
+      ],
+      "handoff_idle_us": [
+        0
+      ],
+      "handoff_preconnect": [
+        1
+      ],
+      "warmup_ms": 0,
+      "measure_ms": 2000,
+      "repetitions": 3
+    },
+    {
+      "name": "hot-preconnect",
+      "kind": "live_e2e",
+      "cn_counts": [
+        2
+      ],
+      "locks": [
+        1
+      ],
+      "distributions": [
+        "uniform"
+      ],
+      "work_ns": [
+        0
+      ],
+      "transports": [
+        "rdma"
+      ],
+      "paxos_slots": 131072,
+      "max_ops": 90000,
+      "seed": 2026,
+      "profiles": [
+        "full_no_join"
+      ],
+      "workers_per_cn": [
+        8
+      ],
+      "data_ops": [
+        1
+      ],
+      "probes": [
+        0
+      ],
+      "rx_idle_us": [
+        0
+      ],
+      "handoff_idle_us": [
+        0
+      ],
+      "handoff_preconnect": [
+        0,
+        1
+      ],
+      "warmup_ms": 0,
+      "measure_ms": 2000,
+      "repetitions": 3
+    },
+    {
+      "name": "hot-handoff-backoff",
+      "kind": "live_e2e",
+      "cn_counts": [
+        2
+      ],
+      "locks": [
+        1
+      ],
+      "distributions": [
+        "uniform"
+      ],
+      "work_ns": [
+        0
+      ],
+      "transports": [
+        "rdma"
+      ],
+      "paxos_slots": 131072,
+      "max_ops": 90000,
+      "seed": 2026,
+      "profiles": [
+        "full_no_join"
+      ],
+      "workers_per_cn": [
+        8
+      ],
+      "data_ops": [
+        1
+      ],
+      "probes": [
+        0
+      ],
+      "rx_idle_us": [
+        5
+      ],
+      "handoff_idle_us": [
+        5,
+        20
+      ],
+      "handoff_preconnect": [
+        1
+      ],
+      "warmup_ms": 0,
+      "measure_ms": 2000,
+      "repetitions": 3
+    }
+  ]
+}

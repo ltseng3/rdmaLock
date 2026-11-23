@@ -29,6 +29,7 @@ LIVE_LINE=('LIVE_E2E status=PASS scope=live_steady_state workers=2 locks=1 zipf=
            'latency_p50_ns=1000 latency_p95_ns=5000 latency_p99_ns=9000 '
            'admission_p50_ns=400 admission_p99_ns=1000 handoff_wait_p99_ns=2000 '
            'goodput_ops_per_sec=614 transport=rdma probe=1 work_ns=0 '
+           'rx_idle_us=0 handoff_idle_us=0 handoff_preconnect=1 '
            'data_ops=1 data_size_bytes=8 read_ratio=0 data_writes_measured=307')
 
 
@@ -64,6 +65,9 @@ class LiveSuiteTests(unittest.TestCase):
         cfg=runner.case_topology(TOPO,cases[0],7777)
         self.assertEqual(cfg['benchmark']['mode'],'live')
         self.assertEqual(cfg['benchmark']['data_ops'],1)
+        self.assertEqual(cfg['benchmark']['rx_idle_us'],0)
+        self.assertEqual(cfg['benchmark']['handoff_idle_us'],0)
+        self.assertEqual(cfg['benchmark']['handoff_preconnect'],1)
         self.assertEqual(cfg['benchmark']['cn_transport'],'rdma')
         self.assertEqual(cfg['benchmark']['ballot'],7777)
         self.assertEqual(cfg['benchmark']['measure_ms'],500)
@@ -98,6 +102,8 @@ class LiveSuiteTests(unittest.TestCase):
                     LIVE_LINE.replace('data_writes_measured=307','data_writes_measured=306'),
                     LIVE_LINE.replace('data_size_bytes=8','data_size_bytes=16'),
                     LIVE_LINE.replace('read_ratio=0','read_ratio=50'),
+                    LIVE_LINE.replace('rx_idle_us=0','rx_idle_us=101'),
+                    LIVE_LINE.replace('handoff_preconnect=1','handoff_preconnect=2'),
                     LIVE_LINE+'\n'+LIVE_LINE]:
             with self.assertRaises(ValueError):runner.parse_summary('live_e2e',bad)
 
@@ -194,6 +200,49 @@ class LiveSuiteTests(unittest.TestCase):
         for n in (0,33,1.5):
             with self.assertRaises(ValueError):
                 runner.expand_suite({'tests':[dict(BASE,data_ops=[n])]},TOPO)
+
+    def test_hot_poll_suites_and_critical_path_knobs(self):
+        for name,count in [('live_hot_poll_smoke.json',28),
+                           ('live_hot_poll_tuning.json',57)]:
+            with self.subTest(suite=name):
+                spec=json.loads((HERE/'suites'/name).read_text())
+                cases=runner.expand_suite(spec,TOPO)
+                self.assertEqual(len(cases),count)
+                self.assertEqual(len({c['id'] for c in cases}),count)
+                self.assertEqual({c['transport'] for c in cases},{'rdma'})
+                self.assertEqual({c['locks'] for c in cases},{1})
+                self.assertEqual({c['paxos_slots'] for c in cases},{131072})
+                self.assertEqual({c['max_ops'] for c in cases},{90000})
+                for case in cases:
+                    cfg=runner.case_topology(TOPO,case,4101)
+                    for knob in ('rx_idle_us','handoff_idle_us','handoff_preconnect'):
+                        self.assertEqual(cfg['benchmark'][knob],case[knob])
+        for knob,bad in [('rx_idle_us',101),('handoff_idle_us',101),
+                         ('handoff_preconnect',2),('rx_idle_us',-1),
+                         ('handoff_preconnect',True)]:
+            with self.subTest(knob=knob,bad=bad):
+                with self.assertRaises(ValueError):
+                    runner.expand_suite({'tests':[dict(BASE,**{knob:[bad]})]},TOPO)
+
+    def test_poll_policy_does_not_merge_unmatched_throughput(self):
+        rows=[]
+        for rx in (0,5):
+            for pc in (0,1):
+                rows.append(dict(kind='live_e2e',scenario='poll',transport='rdma',
+                    cn_nodes=2,worker_processes=16,positions=2048,batch=1,probe=0,
+                    work_ns=0,lock_count=1,distribution='uniform',data_ops=1,
+                    rx_idle_us=rx,handoff_idle_us=0,handoff_preconnect=pc,
+                    data_size_bytes=8,read_ratio=0,warmup_ms=0,measure_ms=2000,
+                    seed=2026,trial=1,status='PASS',profile='raw',
+                    goodput_ops_per_sec='10000'))
+        with tempfile.TemporaryDirectory() as d:
+            path=Path(d)/'summary.csv'
+            runner.summarize(rows,path)
+            with path.open() as fp:
+                summary=list(csv.DictReader(fp))
+            self.assertEqual(len(summary),4)
+            self.assertEqual({(r['rx_idle_us'],r['handoff_preconnect']) for r in summary},
+                             {('0','0'),('0','1'),('5','0'),('5','1')})
 
     def test_data_ops_prevents_invalid_cross_workload_aggregation(self):
         rows=[]

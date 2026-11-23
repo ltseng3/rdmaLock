@@ -280,7 +280,7 @@ def extract_live(text):
              int(result['phase2_max_window'])<2) or
             (int(result['multi_key_pipeline'])==0 and
              (int(result['cross_key_join_batches']) or
-              int(result['cross_key_prepare_batches']))):
+              int(result['cross_key_prepare_batches'])))):
             raise ValueError('invalid asynchronous phase-2 diagnostics')
     for key in ('goodput_ops_per_sec','actual_join_batch_mean'):
         if not math.isfinite(float(result[key])) or float(result[key])<=0:

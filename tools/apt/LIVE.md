@@ -327,6 +327,87 @@ the centralized coordinator's per-JOIN quorum commits and per-Done
 RDMA release-marker reads before considering sharded Mu journals.
 This is *not* a DecLock throughput comparison.
 
+## Asynchronous cross-key Mu Phase-2 pipeline (opt-in)
+
+The old `raw`/ `full` profiles commit each lock's JOIN/PREPARE synchronously,
+even when every request targets a different lock. The multi-key path is
+**explicit opt-in** via `multi_key_pipeline=1` in the suite profile (and
+`MUCQL_MULTI_KEY_PIPELINE=1` inside the coordinator). It does **not**
+change the historical raw/full profiles or their memory/log contracts.
+
+In the pipeline:
+
+1. The CN receive loop builds up to `min(join_aggregate,phase2_window)`
+   actual JOIN requests **across different keys**. It submits them to a
+   dedicated ordering thread without waiting for a quorum. The
+   `batch_wait_us` setting is accounted for as CN admission latency.
+2. That thread assigns a single contiguous log index per record, issues
+   every RDMA WRITE+CAS pair in each bounded window on all three replica
+   QPs, and only then drains CQEs. No JOIN ticket becomes visible until a
+   majority has certified **every entry** in that batch.
+3. Committed JOIN completions trigger cross-key PREPARE tasks. Each lock
+   contributes at most one PREPARE record per window; tasks are FIFO
+   through the same ordering actor, so PREPARE cannot overtake its JOIN.
+   Every ticket and successor notification is sent **only after**
+   its PREPARE majority has completed. Hot locks can refill additional
+   prepared positions until the safe lookahead bound.
+4. Certified release observations are queued in the actor rather than
+   acquiring a mutex while the actor waits on RDMA CQEs. The receive loop
+   stays able to admit new requests and observe prior completions.
+5. On failed/indeterminate quorum, the whole run **fails closed**.
+   It does not expose partially accepted grants, reuse accepted-log
+   addresses, or silently truncate the timing window.
+
+This is real bounded Phase-2 **cross-key batching with asynchronous
+coordinator/ordering overlap**. Each accepted window has up to 16 log
+entries in flight; the actor still drains a window before posting the
+next, and JOIN/PREPARE stages remain causally ordered. It is **not** yet
+an unrestricted sliding-window pipeline of many independently outstanding
+windows, and not a new set of shard leaders.
+
+Each `LIVE_E2E` line and `runs.csv` reports:
+`multi_key_pipeline`, `cross_key_join_batches`,
+`cross_key_prepare_batches`, `phase2_windows_posted`,
+`phase2_multi_record_windows`, `phase2_max_window`,
+and `phase2_records_posted`. These count **actual records posted**
+rather than a configured credit depth. If `phase2_max_window=1`, the
+benchmark did not exercise genuine within-window pipelining, whatever
+the profile configuration says.
+
+### Nine-case single-leader hardware comparison
+
+On CloudLab Node 4:
+
+~~~bash
+cd ~/rdmaLock && git pull --ff-only
+python3 tools/apt/run_suite.py \
+  --suite tools/apt/suites/live_multi_key_async_focus.json --dry-run
+
+python3 tools/apt/run_suite.py \
+  --suite tools/apt/suites/live_multi_key_async_focus.json --fail-fast
+~~~
+
+Only **100,000 uniform keys, 16 clients** (8 processes per CN), 0% reads,
+one completed 8-byte RDMA WRITE, identical 3 Paxos replicas and release
+verification. Three profiles x three repetitions:
+
+- `raw`: one JOIN/log entry per commit, phase2_window=1.
+- `multi_key_control`: phase2_window=16, join_aggregate=16,
+  batch_wait_us=25, but **legacy per-key serial scheduling**.
+- `multi_key_async`: exactly the same batching knobs, with the
+  asynchronous **cross-key** scheduler enabled.
+
+The measured window is **500 ms, zero warmup**. Shortening the original
+one-second window is intentional: the accepted log is non-recycling
+and typically uses one JOIN **and** one PREPARE record per lock cycle.
+At 131072 accepted slots and max_ops=90000, a fast single-leader run
+could otherwise hit the cap and fail before the interval ends.
+The three profiles must be compared to **one another within this suite**,
+not directly to the historical 1-second throughput samples. Inspect
+actual `phase2_max_window`, the count of multi-record windows, P50/P99
+admission and end-to-end latency, and release violations before claiming
+a speedup. CI mock RNIC tests do not establish CloudLab hardware gains.
+
 ## One leader vs five parallel independent leaders — fast capacity diagnostic
 
 **This does NOT implement per-key Mu sharding.** Five distinct MuCQL

@@ -274,7 +274,7 @@ class LiveSuiteTests(unittest.TestCase):
         self.assertEqual({c['workers_per_cn'] for c in cases},{8})
         self.assertEqual({c['transport'] for c in cases},{'rdma'})
         self.assertEqual({c['distribution'] for c in cases},{'uniform'})
-        self.assertEqual({c['measure_ms'] for c in cases},{1000})
+        self.assertEqual({c['measure_ms'] for c in cases},{500})
         for c in cases:
             cfg=runner.case_topology(TOPO,c,4101)
             self.assertEqual(cluster.validate(cfg),16)

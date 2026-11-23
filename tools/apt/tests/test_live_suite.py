@@ -385,6 +385,41 @@ class LiveSuiteTests(unittest.TestCase):
         counts={(c['profile'],c['locks']) for c in cases}
         self.assertEqual(len(counts),8)
 
+    def test_handoff_preconnect_isolated_hot_lock_ab_suite(self):
+        spec=json.loads((HERE/'suites/live_handoff_preconnect_focus.json').read_text())
+        cases=runner.expand_suite(spec,TOPO)
+        self.assertEqual(len(cases),24)
+        self.assertEqual({c['locks'] for c in cases},{1,16})
+        self.assertEqual({c['handoff_preconnect'] for c in cases},{0,1})
+        self.assertEqual({c['trial'] for c in cases},{1,2,3})
+        self.assertEqual({c['profile'] for c in cases},
+                         {'raw_certified_late_start',
+                          'multi_key_async_nowait_certified_late_start'})
+        self.assertEqual({c['probe'] for c in cases},{1})
+        self.assertEqual({c['workers_per_cn'] for c in cases},{8})
+        self.assertEqual({c['cn_count'] for c in cases},{2})
+        self.assertEqual({c['rx_idle_us'] for c in cases},{5})
+        self.assertEqual({c['handoff_idle_us'] for c in cases},{0})
+        self.assertEqual({c['data_ops'] for c in cases},{1})
+        self.assertEqual({c['warmup_ms'] for c in cases},{0})
+        self.assertEqual({c['measure_ms'] for c in cases},{500})
+        self.assertEqual({c['work_ns'] for c in cases},{0})
+        self.assertEqual({c['transport'] for c in cases},{'rdma'})
+        self.assertEqual({c['distribution'] for c in cases},{'uniform'})
+        self.assertEqual(len({(c['profile'],c['locks'],
+                              c['handoff_preconnect'],c['trial'])
+                              for c in cases}),24)
+        for c in cases:
+            cfg=runner.case_topology(TOPO,c,4101)
+            self.assertEqual(cluster.validate(cfg),16)
+            self.assertEqual(cfg['benchmark']['certified_late_start'],1)
+            self.assertEqual(cfg['benchmark']['handoff_preconnect'],
+                             c['handoff_preconnect'])
+            self.assertEqual(cfg['benchmark']['probe'],1)
+            self.assertEqual(cfg['benchmark']['batch_wait_us'],0)
+            self.assertEqual(cfg['benchmark']['multi_key_pipeline'],
+                             int(c['profile'].startswith('multi_key_async')))
+
     def test_ordering_only_microcheck_suite(self):
         suite=json.loads((HERE/'suites/ordering_micro_latency_check.json').read_text())
         cases=runner.expand_suite(suite,TOPO)

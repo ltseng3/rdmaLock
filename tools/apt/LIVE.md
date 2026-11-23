@@ -580,6 +580,43 @@ fallback route was exercised (though it is not proof of its timing).
 The mock-RDMA tests separately check the predecessor-retired-before-
 successor-prepared race and mismatched predecessor rejection.
 
+### Test whether early handoff RDMA QP connection reduces the tail
+
+The first 16-client, probe-enabled, 1/16-hot-lock correctness run
+(`a93f80db`) passed all eight tests. The certified-start modes still had
+genuine predecessor handoffs and handoff-wait P99 around 7–25 ms. The
+`handoff_preconnect` knob moves successor RDMA QP connection setup
+**before** the predecessor waits for retirement when it receives
+`HandoffReady`; with 0 it connects **after** retirement, on the
+blocking handoff path. It is not an all-to-all QP bootstrap and it
+does not alter the required release-before-CAS ordering.
+
+A focused A/B suite compares only the *certified late-start* modes to
+avoid conflating preconnection with unnecessary late handoffs. It uses
+two ordering profiles (synchronous and asynchronous no-wait),
+one and sixteen hot locks, preconnect 0 and 1, and three repetitions:
+**24 trials total**. All have 16 clients, probe=1,
+`rx_idle_us=5`, `handoff_idle_us=0`, no work delay,
+one 8-byte protected data write, no warmup, and 500-ms measurement.
+Each setting's fresh 0-vs-1 controls run in the same session and
+are shuffled to reduce order bias.
+
+~~~bash
+cd ~/rdmaLock && git pull --ff-only
+python3 tools/apt/run_suite.py \
+  --suite tools/apt/suites/live_handoff_preconnect_focus.json --dry-run
+python3 tools/apt/run_suite.py \
+  --suite tools/apt/suites/live_handoff_preconnect_focus.json --fail-fast
+~~~
+
+Check for `status=PASS`, `violations=0`, and verified release
+markers for all grants. Compare `handoff_wait_p99_ns`, `latency_p99_ns`,
+goodput and admission P99 between preconnect=0 and 1 **within the same
+lock count and profile**. Also report `handoff_notifications` and
+`certified_successor_starts`: if very few handoffs occur, the
+preconnect knob cannot explain much. Three short trials are exploratory,
+not a stability guarantee.
+
 ### Check one-sided Paxos ordering separately from end-to-end admission
 
 ~~~bash

@@ -152,6 +152,44 @@ After updating all nodes to the patched commit, **rerun the 24-case
 `live_declock_hot_match.json` only after every smoke trial passes. Do not
 combine incomplete pairs with a new commit's results.
 
+## Paxos accepted-log preflight and long-session lifetime
+
+The 2-second DecLock-style hot-match suite initially used 524288 Paxos
+slots, which maps to **64 MiB of accepted-log MR per Paxos replica**:
+524288 × 128-byte slots. On real hardware, all three replicas appeared
+ready but the coordinator received TCP EOFs during phase 1. This is
+consistent with failure or delay while registering the large MR, but
+server-side MN1–MN3 logs are required to establish the actual cause.
+
+Each Paxos server now **allocates and registers its initial accepted log
+before printing the ready token**, then uses the already registered QP and
+MR for the first ballot. Insufficient pinned memory is therefore a
+startup failure, not an ambiguous coordinator quorum failure.
+The failure explicitly logs the slot count, registration bytes,
+errno, and RLIMIT_MEMLOCK soft limit. The phase-1 TCP handshake uses
+a ten-second timeout, then removes its receive timeout for the lifetime
+of the established RC QP; long measurements must not cause an idle
+bootstrap socket to expire.
+
+For the first matched comparison, the hot and Zipf suites reserve
+**131072 slots (16 MiB per Paxos replica)** and **90000 maximum operations**,
+the footprint already demonstrated by the passing 24-case hardware smoke.
+The two-second measured interval, 0% reads, exclusive-lock workload,
+8-byte write count, and client concurrency are unchanged. Every run
+still fails rather than silently truncating if its fixed nonrecycling log
+or operation budget is exhausted; a failure is not a throughput sample.
+If that occurs, record the specific failure and test an explicitly
+validated larger MR configuration. Do not lower the benchmark duration or
+accept a truncated run as an apples-to-apples result.
+
+For a phase-1 failure on a replica, inspect its server log:
+
+\`\`\`bash
+# On the CloudLab experiment controller, inside the failed case directory:
+grep -R -E 'accepted MR registration|RDMA acceptor session|RDMA Paxos provisioning' \
+    mn1 mn2 mn3
+\`\`\`
+
 ## DecLock-style exclusive critical-section comparison
 
 The live worker now supports **\`data_ops\` = 1..32**, exactly that many

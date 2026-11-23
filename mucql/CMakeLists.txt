@@ -109,6 +109,21 @@ if(MUCQL_MOCK_VERBS_TEST)
   add_executable(mucql_paxos_rdma_mock_test tests/test_paxos_rdma.cpp)
   target_link_libraries(mucql_paxos_rdma_mock_test PRIVATE mucql_mock_verbs mucql_core)
   add_test(NAME mucql_rdma_quorum_mock COMMAND mucql_paxos_rdma_mock_test)
+  # 3.5s mock MR registration cannot consume the 3s phase-1 handshake.
+  # The server must preprovision that MR before reporting readiness.
+  add_test(NAME mucql_rdma_quorum_slow_preflight_mock COMMAND mucql_paxos_rdma_mock_test)
+  set_tests_properties(mucql_rdma_quorum_slow_preflight_mock
+      PROPERTIES ENVIRONMENT "MUCQL_MOCK_ACCEPTED_MR_DELAY_MS=3500"
+                 TIMEOUT 25 RUN_SERIAL TRUE)
+  # Idle RC QPs must survive a TCP bootstrap socket idle for >3 seconds.
+  add_test(NAME mucql_rdma_quorum_idle_mock COMMAND mucql_paxos_rdma_mock_test)
+  set_tests_properties(mucql_rdma_quorum_idle_mock
+      PROPERTIES ENVIRONMENT "MUCQL_TEST_PAXOS_IDLE_MS=3600"
+                 TIMEOUT 25 RUN_SERIAL TRUE)
+  add_executable(mucql_paxos_preflight_mock_test tests/test_paxos_preflight.cpp)
+  target_link_libraries(mucql_paxos_preflight_mock_test PRIVATE mucql_mock_verbs mucql_core Threads::Threads)
+  target_compile_options(mucql_paxos_preflight_mock_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME mucql_rdma_preflight_reject_unavailable_mr COMMAND mucql_paxos_preflight_mock_test)
 endif()
 
 if(MUCQL_MOCK_VERBS_TEST)

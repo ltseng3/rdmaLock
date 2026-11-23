@@ -182,6 +182,13 @@ class LiveSuiteTests(unittest.TestCase):
                 self.assertEqual({c['transport'] for c in cases},{'rdma'})
                 self.assertEqual({c['work_ns'] for c in cases},{0})
                 self.assertEqual({c['cn_count'] for c in cases},{2})
+                # The matched duration remains two seconds, but RNIC accepted
+                # MR size is capped to the 16 MiB proven by the smoke suite.
+                if filename != 'live_declock_hot_smoke.json':
+                    self.assertEqual({c['measure_ms'] for c in cases},{2000})
+                    self.assertEqual({c['warmup_ms'] for c in cases},{0})
+                self.assertEqual({c['paxos_slots'] for c in cases},{131072})
+                self.assertEqual({c['max_ops'] for c in cases},{90000})
                 self.assertTrue(all(runner.case_topology(TOPO,c,4101)['benchmark']['data_ops']==c['data_ops']
                                     for c in cases))
         for n in (0,33,1.5):

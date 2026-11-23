@@ -14,10 +14,18 @@ int main(){
     auto port=static_cast<uint16_t>(29660+i);
     std::thread([o,port]{serve_rdma_paxos(port,o);}).detach();
   }
-  std::this_thread::sleep_for(std::chrono::milliseconds(120));
+  // Under the injected mock-MR latency, replicas must provision their
+  // accepted buffers BEFORE advertising phase-1 TCP readiness.
+  if(const char* delay=std::getenv("MUCQL_MOCK_ACCEPTED_MR_DELAY_MS"))
+    std::this_thread::sleep_for(std::chrono::milliseconds(std::stoul(delay)+300));
+  else
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
   std::vector<std::shared_ptr<Acceptor>> reps;
   for(int i=0;i<3;i++)reps.push_back(std::make_shared<RdmaAcceptor>("127.0.0.1",29660+i,o));
   LocalQuorum q(reps);PaxosJournal j(q,10);j.take_over();
+  // A phase-2 QP must remain live even if the TCP bootstrap socket is idle.
+  if(const char* idle=std::getenv("MUCQL_TEST_PAXOS_IDLE_MS"))
+    std::this_thread::sleep_for(std::chrono::milliseconds(std::stoul(idle)));
   ClockImpl clk;Leader a(j,clk);
   for(int i=0;i<6;i++){auto t=a.join(7,100+i,1);require(t.position==static_cast<uint64_t>(i));}
   auto prepared=a.prepare(7,6);require(prepared.size()==6);

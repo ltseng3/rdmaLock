@@ -4,6 +4,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#include <sys/resource.h>
 #include <unistd.h>
 #include <cerrno>
 #include <array>
@@ -27,7 +28,8 @@ void send_all(int f,const void*p,size_t n){auto*b=static_cast<const char*>(p);
     b+=k;n-=static_cast<size_t>(k);}}
 void recv_all(int f,void*p,size_t n){auto*b=static_cast<char*>(p);
   while(n){auto k=::recv(f,b,n,0);if(k<0&&errno==EINTR)continue;
-    if(k<=0)fail("TCP receive");
+    if(k==0)fail("TCP receive: peer closed connection during phase-1 handshake");
+    if(k<0)fail("TCP receive: "+std::string(std::strerror(errno)));
     b+=k;n-=static_cast<size_t>(k);}}
 uint32_t gen_psn(){return static_cast<uint32_t>(std::chrono::steady_clock::now().time_since_epoch().count())&0xffffff;}
 constexpr uint64_t kMagic=0x4d5543514c524431ULL; // MUCQLRD1
@@ -116,8 +118,18 @@ int connect_tcp(const std::string&h,uint16_t port){addrinfo hints{};hints.ai_soc
     if(::connect(s,a->ai_addr,a->ai_addrlen)==0){sock=s;break;}
     ::close(s);}
   freeaddrinfo(res);if(sock<0)fail("connect to "+h);return sock;}
-void set_timeout(int fd){timeval t{};t.tv_sec=3;setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&t,sizeof(t));
-  setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&t,sizeof(t));}
+void set_timeout(int fd){timeval t{};t.tv_sec=10;
+  if(setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&t,sizeof(t))!=0 ||
+     setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&t,sizeof(t))!=0)
+    fail("setting TCP phase-1 timeout: "+std::string(std::strerror(errno)));
+}
+void clear_receive_timeout(int fd){
+  // A prepared QP must stay alive while its leader is active, including
+  // multi-second benchmark measurements. Never expire it just for idleness.
+  timeval t{};
+  if(setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&t,sizeof(t))!=0)
+    fail("clearing TCP session timeout: "+std::string(std::strerror(errno)));
+}
 struct Active {
   Dev& d;uint64_t ballot{};uint32_t slots{};void* mem{};ibv_mr* mr{};QP qp;
   explicit Active(Dev&d,uint64_t b,uint32_t n):d(d),ballot(b),slots(n),qp(d){
@@ -125,7 +137,20 @@ struct Active {
     std::memset(mem,0,static_cast<size_t>(n)*sizeof(AcceptedSlot));
     mr=ibv_reg_mr(d.pd,mem,static_cast<size_t>(n)*sizeof(AcceptedSlot),
         IBV_ACCESS_LOCAL_WRITE|IBV_ACCESS_REMOTE_WRITE|IBV_ACCESS_REMOTE_ATOMIC);
-    if(!mr)fail("accepted MR registration");
+    if(!mr){
+      const int error=errno;
+      rlimit limit{};
+      const bool have_limit=getrlimit(RLIMIT_MEMLOCK,&limit)==0;
+      const auto soft=have_limit?
+        (limit.rlim_cur==RLIM_INFINITY?std::string("unlimited"):
+         std::to_string(static_cast<unsigned long long>(limit.rlim_cur))):
+        std::string("unavailable");
+      std::free(mem);mem=nullptr;
+      fail("accepted MR registration: slots="+std::to_string(n)+
+           " bytes="+std::to_string(static_cast<size_t>(n)*sizeof(AcceptedSlot))+
+           " errno="+std::to_string(error)+" ("+std::strerror(error)+
+           ") RLIMIT_MEMLOCK_soft="+soft);
+    }
   }
   ~Active(){if(mr)ibv_dereg_mr(mr);std::free(mem);}
   QpWire info()const{return qp.info(reinterpret_cast<uintptr_t>(mem),mr->rkey,slots);}
@@ -145,7 +170,17 @@ struct Server {
   Dev dev;RdmaPaxosOptions opts;std::mutex mu;uint64_t promised{};
   std::map<uint64_t,Accepted> accepted;
   std::shared_ptr<Active> current;
-  explicit Server(const RdmaPaxosOptions&o):dev(o),opts(o){if(o.slots<1||o.slots>1000000)fail("slots range");}
+  explicit Server(const RdmaPaxosOptions&o):dev(o),opts(o){
+    if(o.slots<1||o.slots>1000000)fail("slots range");
+    // The previous design registered the entire accepted log only AFTER
+    // announcing TCP readiness. Large logs could therefore pass readiness
+    // and fail on all three followers during phase 1. Provision the first
+    // session here, before declaring a healthy server; reuse its QP/MR for
+    // the first ballot so startup doesn't allocate the pinned log twice.
+    std::cout<<"RDMA Paxos provisioning accepted log slots="<<o.slots
+             <<" bytes="<<(size_t(o.slots)*sizeof(AcceptedSlot))<<std::endl;
+    current=std::make_shared<Active>(dev,0,opts.slots);
+  }
   void serve(int c){
     try{
       set_timeout(c);Control hello{};recv_all(c,&hello,sizeof(hello));
@@ -159,10 +194,17 @@ struct Server {
            (promised && !opts.allow_experimental_takeover)){
           Answer no{kMagic,0,0};send_all(c,&no,sizeof(no));::close(c);return;
         }
+        if(current && current->ballot==0){
+          // First ballot uses the already registered but unused accepted log.
+          // The first QP is still in INIT; never fence an unused QP.
+          current->ballot=hello.ballot;
+          session=current;
+        }else{
+          if(current){current->qp.fence();current->collect(accepted);}
+          session=std::make_shared<Active>(dev,hello.ballot,opts.slots);
+          current=session;
+        }
         promised=hello.ballot;
-        if(current){current->qp.fence();current->collect(accepted);}
-        session=std::make_shared<Active>(dev,hello.ballot,opts.slots);
-        current=session;
         Answer ok{kMagic,1,accepted.size()};send_all(c,&ok,sizeof(ok));
         for(const auto& kv:accepted){AcceptedWire x{kv.second.ballot,pack(kv.second.value)};
           send_all(c,&x,sizeof(x));}
@@ -170,8 +212,10 @@ struct Server {
         QpWire leader{};recv_all(c,&leader,sizeof(leader));session->qp.connect(leader);
         uint8_t ready=0x51;send_all(c,&ready,1);
       }
-      // The server CPU is absent from every phase-2 acceptance. Keep this
-      // control/QP lifetime until the leader disconnects or loses a ballot.
+      // This is an established RC QP, not a phase-1 request. Clearing the
+      // receive timeout keeps the bootstrap socket/QP alive until the leader
+      // disconnects, independent of measurement duration.
+      clear_receive_timeout(c);
       uint8_t dummy=0;while(::recv(c,&dummy,1,0)>0){}
     }catch(const std::exception&e){std::cerr<<"RDMA acceptor session: "<<e.what()<<'\n';}
     ::close(c);
@@ -209,11 +253,14 @@ Promise RdmaAcceptor::prepare(uint64_t ballot){
   impl_->prepared_ballot=0;
   // A new QP is mandatory on each ballot; reconnecting an old QP would
   // defeat acceptor-side permission fencing of lower-ballot leaders.
+  std::string stage="opening QP and TCP bootstrap";
   try{
     impl_->qp=std::make_unique<QP>(impl_->dev);
     impl_->sock=connect_tcp(impl_->host,impl_->port);set_timeout(impl_->sock);
+    stage="waiting for phase-1 promise";
     Control h{kMagic,ballot,0};send_all(impl_->sock,&h,sizeof(h));
     Answer response{};recv_all(impl_->sock,&response,sizeof(response));
+    stage="receiving accepted state";
     if(response.magic!=kMagic||!response.ok||response.count>impl_->opts.slots)return {};
     Promise promise{};promise.granted=true;
     for(uint64_t i=0;i<response.count;i++){
@@ -223,15 +270,19 @@ Promise RdmaAcceptor::prepare(uint64_t ballot){
     }
     recv_all(impl_->sock,&impl_->remote,sizeof(impl_->remote));
     if(impl_->remote.slots!=impl_->opts.slots)fail("slot count mismatch");
+    stage="connecting RC QP";
     auto local=impl_->qp->info();send_all(impl_->sock,&local,sizeof(local));
     impl_->qp->connect(impl_->remote);
+    stage="waiting for RC QP ready";
     uint8_t ready=0;recv_all(impl_->sock,&ready,1);if(ready!=0x51)fail("QP handshake");
     impl_->posted.clear();
     impl_->poisoned=false;impl_->pending=false;impl_->pending_batch=0;
     impl_->prepared_ballot=ballot;
     return promise;
   }catch(const std::exception&e){
-    std::cerr<<"RDMA prepare failed: "<<e.what()<<'\n';return {};
+    std::cerr<<"RDMA prepare failed at "<<impl_->host<<":"<<impl_->port
+             <<" ["<<stage<<"]: "<<e.what()<<'\n';
+    return {};
   }
 }
 bool RdmaAcceptor::accept(uint64_t ballot,const Record& r){

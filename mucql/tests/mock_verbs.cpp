@@ -6,6 +6,10 @@
 #include <unordered_map>
 #include <vector>
 #include <string>
+#include <chrono>
+#include <thread>
+#include <cstdlib>
+#include <cerrno>
 namespace {
 std::mutex m;
 ibv_device d{{'m','o','c','k','0','\0'}};
@@ -35,7 +39,22 @@ int ibv_modify_qp(ibv_qp*q,ibv_qp_attr*a,int flags){std::lock_guard<std::mutex> 
   if(flags&IBV_QP_STATE)q->state=a->qp_state;
   if(flags&IBV_QP_DEST_QPN)q->remote_qpn=a->dest_qp_num;
   return 0;}
-ibv_mr* ibv_reg_mr(ibv_pd*,void*addr,size_t len,int){std::lock_guard<std::mutex> l(m);auto* mr=new ibv_mr{addr,len,++next_key,++next_key};regions[mr->rkey]=mr;return mr;}
+ibv_mr* ibv_reg_mr(ibv_pd*,void*addr,size_t len,int){
+  // Fault-injection is specific to the accepted-log MR, not the small
+  // per-QP send buffers. Simulates expensive or rejected registration.
+  if(len>=8192){
+    if(const char* ms=std::getenv("MUCQL_MOCK_ACCEPTED_MR_DELAY_MS"))
+      std::this_thread::sleep_for(std::chrono::milliseconds(std::stoul(ms)));
+    if(std::getenv("MUCQL_MOCK_REJECT_ACCEPTED_MR")){
+      errno=ENOMEM;
+      return nullptr;
+    }
+  }
+  std::lock_guard<std::mutex> l(m);
+  auto* mr=new ibv_mr{addr,len,++next_key,++next_key};
+  regions[mr->rkey]=mr;
+  return mr;
+}
 int ibv_dereg_mr(ibv_mr* mr){std::lock_guard<std::mutex> l(m);regions.erase(mr->rkey);delete mr;return 0;}
 int ibv_post_recv(ibv_qp* q,ibv_recv_wr*wr,ibv_recv_wr**bad){
   std::lock_guard<std::mutex> l(m);*bad=nullptr;

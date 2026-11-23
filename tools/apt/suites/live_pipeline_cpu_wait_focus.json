@@ -1,0 +1,54 @@
+{
+  "seed": 2026,
+  "shuffle": true,
+  "tests": [
+    {
+      "name": "pipeline-cpu-wait-focus",
+      "kind": "live_e2e",
+      "profiles": [
+        "raw",
+        "multi_key_async",
+        "multi_key_async_nowait"
+      ],
+      "transports": [
+        "rdma"
+      ],
+      "cn_counts": [
+        2
+      ],
+      "workers_per_cn": [
+        8
+      ],
+      "locks": [
+        100000
+      ],
+      "distributions": [
+        "uniform"
+      ],
+      "probes": [
+        0
+      ],
+      "work_ns": [
+        0
+      ],
+      "data_ops": [
+        1
+      ],
+      "rx_idle_us": [
+        0,
+        5
+      ],
+      "handoff_idle_us": [
+        0
+      ],
+      "handoff_preconnect": [
+        0
+      ],
+      "warmup_ms": 0,
+      "measure_ms": 500,
+      "paxos_slots": 131072,
+      "max_ops": 90000,
+      "repetitions": 2
+    }
+  ]
+}

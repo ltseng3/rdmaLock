@@ -428,6 +428,54 @@ batches/records, the count of multi-record windows, P50/P99
 admission and end-to-end latency, and release violations before claiming
 a speedup. CI mock RNIC tests do not establish CloudLab hardware gains.
 
+### Diagnosis after the first hardware pipeline comparison
+
+The first 16-client, 100,000-uniform-key, 500ms run at commit
+`5d6d86cd` showed **no raw-profile throughput win**:
+
+| Profile | Median ops/s | End-to-end median P50 | End-to-end median P99 |
+| --- | ---: | ---: | ---: |
+| `raw` | 21146 | 262 us | 13.23 ms |
+| `multi_key_control` | 18102 | 532 us | 7.17 ms |
+| `multi_key_async` | 20778 | 432 us | 9.99 ms |
+
+These latency numbers are medians of per-run percentiles (not a pooled
+distribution); three short trials fluctuate considerably. Async did
+*actually* overlap up to three Phase-2 batches, up to 32 RDMA records,
+with 388–468 overlapping submissions, yet its median throughput was
+1.7% below raw. Do not represent it as a performance optimization yet.
+
+Two concrete overhead sources merit a controlled measurement:
+`multi_key_async` adds a 25-us JOIN aggregation wait even on a lightly
+loaded unique-key queue, and each coordinator has one actively polling
+control RECEIVE thread per worker. With 16 CN workers, MN4 runs at least
+16 such receiver threads plus the scheduling loop and, for async, the
+ordering actor. CPU contention is **a hypothesis, not a confirmed cause**.
+
+A small follow-up varies these two knobs independently using a new
+`multi_key_async_nowait` profile (same async Phase-2 scheduler, window
+and join aggregation, but no forced 25-us wait). It leaves the existing
+`raw` and `multi_key_async` profiles unchanged:
+
+~~~bash
+cd ~/rdmaLock && git pull --ff-only
+python3 tools/apt/run_suite.py \
+  --suite tools/apt/suites/live_pipeline_cpu_wait_focus.json --dry-run
+python3 tools/apt/run_suite.py \
+  --suite tools/apt/suites/live_pipeline_cpu_wait_focus.json --fail-fast
+~~~
+
+This is **12 trials total**: three profiles (`raw`,
+`multi_key_async`, `multi_key_async_nowait`), two receiver idle
+backoffs (0, 5 us), two repetitions each; all other work dimensions
+match the earlier pipeline test. The 5-us receive sleep is applied
+every 32 empty CQ polls rather than on every poll. Compare latency and
+throughput **within each receiver-idle setting**, and evaluate the
+actual multi-key and overlap diagnostics. In particular, removing
+the wait may reduce the average Phase-2 batch size; throughput must
+establish whether that tradeoff helps. These results will not, by
+themselves, isolate replica CPU or NIC limits.
+
 ## One leader vs five parallel independent leaders — fast capacity diagnostic
 
 **This does NOT implement per-key Mu sharding.** Five distinct MuCQL

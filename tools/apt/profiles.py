@@ -27,6 +27,10 @@ PROFILES = {
     # asynchronous Phase-2 window on a dedicated ordering thread.
     'multi_key_async': Profile(join_aggregate=16,phase2_window=16,
                                batch_wait_us=25,multi_key_pipeline=1),
+    # Identical async Phase-2 path, but opportunistic batching: do not
+    # sleep the receive thread merely to collect more independent JOINs.
+    'multi_key_async_nowait': Profile(join_aggregate=16,phase2_window=16,
+                                      batch_wait_us=0,multi_key_pipeline=1),
     'join_control': Profile(batch_wait_us=25),
     'join_aggregation': Profile(join_aggregate=16, batch_wait_us=25),
     'phase2_control': Profile(join_aggregate=16, batch_wait_us=25),

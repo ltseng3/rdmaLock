@@ -287,6 +287,35 @@ class LiveSuiteTests(unittest.TestCase):
             self.assertEqual(cfg['benchmark']['prepare_range'],1)
             self.assertEqual(cfg['benchmark']['lookahead'],2)
 
+    def test_pipeline_cpu_wait_diagnostic_is_small_and_isolates_knobs(self):
+        spec=json.loads((HERE/'suites/live_pipeline_cpu_wait_focus.json').read_text())
+        cases=runner.expand_suite(spec,TOPO)
+        self.assertEqual(len(cases),12)
+        self.assertEqual(len({c['id'] for c in cases}),12)
+        self.assertEqual({c['workers_per_cn'] for c in cases},{8})
+        self.assertEqual({c['locks'] for c in cases},{100000})
+        self.assertEqual({c['rx_idle_us'] for c in cases},{0,5})
+        self.assertEqual({c['profile'] for c in cases},
+                         {'raw','multi_key_async','multi_key_async_nowait'})
+        self.assertEqual({c['measure_ms'] for c in cases},{500})
+        self.assertEqual({c['warmup_ms'] for c in cases},{0})
+        self.assertEqual({c['transport'] for c in cases},{'rdma'})
+        self.assertEqual({c['handoff_idle_us'] for c in cases},{0})
+        self.assertEqual({c['handoff_preconnect'] for c in cases},{0})
+        self.assertEqual({c['distribution'] for c in cases},{'uniform'})
+        self.assertEqual({c['data_ops'] for c in cases},{1})
+        for c in cases:
+            cfg=runner.case_topology(TOPO,c,4101)
+            self.assertEqual(cluster.validate(cfg),16)
+            b=cfg['benchmark']
+            self.assertEqual(b['multi_key_pipeline'],int(c['profile']!='raw'))
+            self.assertEqual(b['join_aggregate'],1 if c['profile']=='raw' else 16)
+            self.assertEqual(b['phase2_window'],1 if c['profile']=='raw' else 16)
+            self.assertEqual(b['batch_wait_us'],25 if c['profile']=='multi_key_async' else 0)
+            self.assertEqual(b['rx_idle_us'],c['rx_idle_us'])
+            self.assertEqual(b['prepare_range'],1)
+            self.assertEqual(b['lookahead'],2)
+
     def test_async_phase2_output_proves_actual_cross_key_windows(self):
         suffix=(' multi_key_pipeline=1 cross_key_join_batches=4'
                 ' cross_key_prepare_batches=3 phase2_windows_posted=12'

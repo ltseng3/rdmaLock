@@ -361,6 +361,43 @@ class LiveSuiteTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,'certified successor'):
                     runner.extract_live(LIVE_LINE+bad)
 
+    def test_hot_certified_handoff_probe_suite(self):
+        suite=json.loads((HERE/'suites/live_handoff_hot_correctness.json').read_text())
+        cases=runner.expand_suite(suite,TOPO)
+        self.assertEqual(len(cases),8)
+        self.assertEqual({c['locks'] for c in cases},{1,16})
+        self.assertEqual({c['probe'] for c in cases},{1})
+        self.assertEqual({c['profile'] for c in cases},
+                         {'raw','raw_certified_late_start',
+                          'multi_key_async_nowait',
+                          'multi_key_async_nowait_certified_late_start'})
+        self.assertEqual({c['workers_per_cn'] for c in cases},{8})
+        self.assertEqual({c['measure_ms'] for c in cases},{500})
+        self.assertEqual({c['handoff_preconnect'] for c in cases},{0})
+        self.assertEqual({c['rx_idle_us'] for c in cases},{5})
+        self.assertEqual({c['data_ops'] for c in cases},{1})
+        for case in cases:
+            cfg=runner.case_topology(TOPO,case,4101)
+            self.assertEqual(cluster.validate(cfg),16)
+            self.assertEqual(cfg['benchmark']['probe'],1)
+            self.assertEqual(cfg['benchmark']['certified_late_start'],
+                             int(case['profile'].endswith('_certified_late_start')))
+        counts={(c['profile'],c['locks']) for c in cases}
+        self.assertEqual(len(counts),8)
+
+    def test_ordering_only_microcheck_suite(self):
+        suite=json.loads((HERE/'suites/ordering_micro_latency_check.json').read_text())
+        cases=runner.expand_suite(suite,TOPO)
+        self.assertEqual(len(cases),4)
+        self.assertEqual({c['kind'] for c in cases},{'ordering_micro'})
+        self.assertEqual({c['positions'] for c in cases},{1024})
+        self.assertEqual({c['batch'] for c in cases},{1,16})
+        self.assertEqual({c['probe'] for c in cases},{0})
+        self.assertEqual({c['workers_per_cn'] for c in cases},{0})
+        for case in cases:
+            cfg=runner.case_topology(TOPO,case,4101)
+            self.assertEqual(cfg['benchmark']['order_batch'],case['batch'])
+
     def test_async_phase2_output_proves_actual_cross_key_windows(self):
         suffix=(' multi_key_pipeline=1 cross_key_join_batches=4'
                 ' cross_key_prepare_batches=3 phase2_windows_posted=12'

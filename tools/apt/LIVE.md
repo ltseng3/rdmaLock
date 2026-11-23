@@ -546,6 +546,66 @@ handoff-wait P99 was usually smaller; this optimization may reduce
 avoidable handoff latency without resolving the broader scheduling
 bottleneck. No hardware benefit is claimed until verified.
 
+### One-lock and 16-lock ownership correctness under contention
+
+After validating the certified late-START fast path on 100,000 uniform
+keys, use the committed hot-lock suite to exercise **real** fallback CAS
+handoffs. This is not a throughput optimization claim; it is a safety smoke
+test.
+
+~~~bash
+cd ~/rdmaLock && git pull --ff-only
+python3 tools/apt/run_suite.py \
+  --suite tools/apt/suites/live_handoff_hot_correctness.json --dry-run
+python3 tools/apt/run_suite.py \
+  --suite tools/apt/suites/live_handoff_hot_correctness.json --fail-fast
+~~~
+
+Eight cases = four profiles (`raw`, `raw_certified_late_start`,
+`multi_key_async_nowait`,
+`multi_key_async_nowait_certified_late_start`)
+times **1 or 16 uniform hot locks**, one repetition. Each uses
+16 closed-loop clients on two CNs, `probe=1`, `rx_idle_us=5`,
+`handoff_preconnect=0`, one protected RDMA data write, no warmup,
+and a 500-ms measurement interval. The exclusive owner CAS probe
+acquires the dedicated owner slot before the protected WRITE and releases
+it afterward; two simultaneous holders produce a hard failure.
+All completed grants, release markers, and last data values are checked.
+
+For every case require `PASS`, `violations=0`, and verified
+releases equal joins. For the fast-start profiles inspect
+`handoff_notifications` and `certified_successor_starts`: a
+`handoff_notifications>0` count confirms that the unverified-predecessor
+fallback route was exercised (though it is not proof of its timing).
+The mock-RDMA tests separately check the predecessor-retired-before-
+successor-prepared race and mismatched predecessor rejection.
+
+### Check one-sided Paxos ordering separately from end-to-end admission
+
+~~~bash
+python3 tools/apt/run_suite.py \
+  --suite tools/apt/suites/ordering_micro_latency_check.json --dry-run
+python3 tools/apt/run_suite.py \
+  --suite tools/apt/suites/ordering_micro_latency_check.json --fail-fast
+~~~
+
+Four cases = 1024 JOIN log entries, batch sizes 1 and 16, two
+repetitions. The ordering driver runs on MN4; CNs and protected data
+operations are absent. Phase-1 takeover and initial QP setup are outside
+the timed loop. The reported `ordered_entries_per_sec` is an average
+throughput, **not a percentile of consensus latency**; only batch=1
+permits using the reciprocal as an approximate per-commit service
+time. Batch=16 gives amortized cost per record. This is also
+**not the published Mu implementation**: MuCQL's Paxos acceptor
+uses a remote RDMA WRITE plus CAS marker for each accepted record.
+
+Our LIVE lock acquisition uses two records (JOIN followed by PREPARE),
+with additional CN admission SEND/CQE, coordinator scheduling,
+release-marker verification, RDMA protected WRITE and release CAS.
+Those end-to-end stages are absent from the isolated ordering microcheck.
+A microsecond-scale RDMA replication path does not imply microsecond-
+scale lock acquisition under a busy software coordinator.
+
 ## One leader vs five parallel independent leaders — fast capacity diagnostic
 
 **This does NOT implement per-key Mu sharding.** Five distinct MuCQL

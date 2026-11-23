@@ -1,0 +1,18 @@
+{
+  "seed": 2026,
+  "shuffle": true,
+  "tests": [
+    {
+      "name": "one-sided-paxos-microcheck",
+      "kind": "ordering_micro",
+      "batches": [
+        1,
+        16
+      ],
+      "positions": [
+        1024
+      ],
+      "repetitions": 2
+    }
+  ]
+}

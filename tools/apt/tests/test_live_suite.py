@@ -283,7 +283,7 @@ class LiveSuiteTests(unittest.TestCase):
             self.assertEqual(cfg['benchmark']['locks'],100000)
             self.assertEqual(cfg['benchmark']['paxos_slots'],131072)
             self.assertEqual(cluster.validate(cfg),2)
-            cmds=cluster.commands(cfg,'data_mn')
+            cmds=cluster.commands(cfg,cfg['data_mn']['id'])
             # The existing non-recycling accepted-log reservation is NOT
             # enlarged to the number of logical locks.
             self.assertIn('331104',str(cmds))

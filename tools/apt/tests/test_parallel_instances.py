@@ -15,31 +15,41 @@ TOPO=json.loads((HERE/'topology.example.json').read_text())
 
 class ParallelInstanceTests(unittest.TestCase):
     def test_constant_total_workers_and_partitioned_keyspace(self):
-        for n in (1,5):
-            with self.subTest(instances=n):
-                cases=experiment.make_cases(TOPO,n,1,'TEST_GO')
-                self.assertEqual(len(cases),n)
-                self.assertEqual(len({c['id'] for c in cases}),n)
-                self.assertEqual(sum(c['locks'] for c in cases),100000)
-                self.assertEqual(sum(c['workers_per_cn']*c['cn_count']
-                                     for c in cases),10)
-                self.assertEqual({c['measure_ms'] for c in cases},{1000})
-                self.assertEqual({c['warmup_ms'] for c in cases},{0})
-                self.assertEqual({c['data_ops'] for c in cases},{1})
-                self.assertEqual({c['distribution'] for c in cases},{'uniform'})
-                self.assertEqual({c['transport'] for c in cases},{'rdma'})
-                self.assertEqual({c['profile'] for c in cases},{'raw'})
-                self.assertEqual({c['probe'] for c in cases},{0})
-                self.assertEqual({c['handoff_preconnect'] for c in cases},{0})
-                self.assertEqual({c['paxos_slots'] for c in cases},{131072})
-                self.assertEqual({c['max_ops'] for c in cases},{90000})
-                offsets=[c['port_offset'] for c in cases]
-                self.assertEqual(offsets,[200*i for i in range(n)])
-                for c in cases:
-                    cfg=suite.case_topology(TOPO,c,4101)
-                    self.assertEqual(cfg['benchmark']['start_gate'],'TEST_GO')
-                    self.assertEqual(cluster.validate(cfg),10//n)
-                experiment.port_sets(TOPO,cases)
+        for workers_per_cn in (5,8):
+            for n in (1,5):
+                with self.subTest(instances=n,per_cn=workers_per_cn):
+                    cases=experiment.make_cases(TOPO,n,1,'TEST_GO',
+                                                workers_per_cn)
+                    self.assertEqual(len(cases),n)
+                    self.assertEqual(len({c['id'] for c in cases}),n)
+                    self.assertEqual(sum(c['locks'] for c in cases),100000)
+                    self.assertEqual(sum(c['workers_per_cn']*c['cn_count']
+                                         for c in cases),2*workers_per_cn)
+                    self.assertEqual({c['measure_ms'] for c in cases},{1000})
+                    self.assertEqual({c['warmup_ms'] for c in cases},{0})
+                    self.assertEqual({c['data_ops'] for c in cases},{1})
+                    self.assertEqual({c['distribution'] for c in cases},{'uniform'})
+                    self.assertEqual({c['transport'] for c in cases},{'rdma'})
+                    self.assertEqual({c['profile'] for c in cases},{'raw'})
+                    self.assertEqual({c['probe'] for c in cases},{0})
+                    self.assertEqual({c['handoff_preconnect'] for c in cases},{0})
+                    self.assertEqual({c['paxos_slots'] for c in cases},{131072})
+                    self.assertEqual({c['max_ops'] for c in cases},{90000})
+                    self.assertEqual(
+                        [c['port_offset'] for c in cases],[200*i for i in range(n)])
+                    for c in cases:
+                        cfg=suite.case_topology(TOPO,c,4101)
+                        self.assertEqual(cfg['benchmark']['start_gate'],'TEST_GO')
+                        self.assertEqual(cluster.validate(cfg),
+                                         2*c['workers_per_cn'])
+                    experiment.port_sets(TOPO,cases)
+        five=experiment.make_cases(TOPO,5,1,'TEST_GO',8)
+        self.assertEqual([c['workers_per_cn'] for c in five],[2,2,2,1,1])
+        self.assertEqual([c['locks'] for c in five],
+                         [25000,25000,25000,12500,12500])
+        old=experiment.make_cases(TOPO,5,1,'TEST_GO',5)
+        self.assertEqual([c['workers_per_cn'] for c in old],[1]*5)
+        self.assertEqual([c['locks'] for c in old],[20000]*5)
 
     def test_refuses_bad_gate_and_insufficient_cores(self):
         for gate in ('../escape','abc space','', 'x'*97):
@@ -52,8 +62,12 @@ class ParallelInstanceTests(unittest.TestCase):
                     experiment.make_cases(TOPO,count,1,'VALID')
         other=json.loads(json.dumps(TOPO))
         other['clients'][0]['cores']=4
-        with self.assertRaisesRegex(ValueError,'five usable cores'):
+        with self.assertRaisesRegex(ValueError,'8 usable cores'):
             experiment.make_cases(other,5,1,'VALID')
+        for count in (4,9,17,True):
+            with self.subTest(workers_per_cn=count):
+                with self.assertRaises(ValueError):
+                    experiment.make_cases(TOPO,5,1,'VALID',count)
 
     def test_ports_are_disjoint_on_shared_hosts(self):
         cases=experiment.make_cases(TOPO,5,1,'VALID')
@@ -89,11 +103,19 @@ class ParallelInstanceTests(unittest.TestCase):
         start=1800000000000000000
         for n in (1,5):
             rows=[row(i,n,start+i*1200000) for i in range(n)]
-            result=experiment.combine(n,1,rows)
+            result=experiment.combine(n,1,rows,5)
             self.assertEqual(result['instances'],n)
             self.assertEqual(result['workers_total'],10)
             self.assertEqual(result['keys_total'],100000)
             self.assertAlmostEqual(result['aggregate_ops_per_sec'],n*12345.5)
+        # Default 16 clients are allocated unevenly but keep total
+        # workers, 100K keys, and synchronized GO exactly identical.
+        cases=experiment.make_cases(TOPO,5,1,'VALID',8)
+        rows16=[dict(row(i,5,start+i*1200000),
+                     worker_processes=2*c['workers_per_cn'],
+                     lock_count=c['locks']) for i,c in enumerate(cases)]
+        self.assertEqual(experiment.combine(5,1,rows16)['workers_total'],16)
+        self.assertEqual(experiment.combine(5,1,rows16)['keys_total'],100000)
         for wrong in (
             [row(i,5,start+i*30000000) for i in range(5)],
             [dict(row(i,5,start),status='FAIL') if i==2 else row(i,5,start)
@@ -103,7 +125,7 @@ class ParallelInstanceTests(unittest.TestCase):
             [row(i,5,start) for i in range(4)],
         ):
             with self.assertRaises(ValueError):
-                experiment.combine(5,1,wrong)
+                experiment.combine(5,1,wrong,5)
 
     def test_go_timestamp_in_live_parser(self):
         import run_suite

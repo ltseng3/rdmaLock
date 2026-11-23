@@ -336,19 +336,35 @@ They share the SAME three physical replica hosts, MN4 host, two CN hosts,
 RNICs, and CPU budgets. No independent instance can acquire a lock
 belonging to another instance; there is no unified client-facing lock API.
 
-Compare **equal 10-worker total client concurrency and 100,000 total keys**:
+The first hardware run used **10 workers total**: one leader achieved a
+median 31,162 ops/s; five independent instances achieved 79,051 ops/s
+(2.54×). With only two clients per leader and median latency near 114 µs,
+client-side closed-loop concurrency may limit the multi-leader result.
+
+The **new default is 16 total worker-clients**, the maximum non-oversubscribed
+count on the two configured eight-core CN nodes. Both modes still use exactly
+100,000 keys and the same total client concurrency:
 
 | Mode | Instances | Workers / CN / instance | Keys / instance | Total clients |
-| --- | ---: | ---: | ---: | ---: |
-| Single leader | 1 | 5 | 100000 | 10 |
-| Parallel independent leaders | 5 | 1 | 20000 | 10 |
+| --- | ---: | --- | --- | ---: |
+| Single leader | 1 | 8 | 100000 | 16 |
+| Parallel independent leaders | 5 | 2, 2, 2, 1, 1 | 25000, 25000, 25000, 12500, 12500 | 16 |
+
+The uneven five-leader allocation maximizes existing client capacity while
+avoiding CPU oversubscription. **Key counts are proportional to the workers**
+in each instance, so uniform per-client key selection yields an approximately
+uniform global key workload. The run also supports `--workers-per-cn 5` to
+reproduce the earlier ten-client experiment. The optional range is 5..16,
+but actual physical CN `cores` configuration is strictly enforced; on the
+present testbed, 8 per CN is the maximum.
 
 Both are raw profiles, uniform distribution, one completed 8-byte data
 RDMA WRITE per exclusive lock cycle, zero warmup, 1000ms measurement,
 131072 accepted slots and 90000 max_ops per instance, no polling backoffs,
-no preconnection, zero probes. The ten workers are bound by the *same*
+no preconnection, zero probes. Both configurations use the *same*
 two CNs' configured 8-core budget; the five-leader mode does not launch
-40 workers or compare with the historical eight-worker baseline.
+40 workers or compare with the historical ten-worker baseline as though
+the concurrency were identical.
 
 The independent accepted-log memory cost is **5 × 16 MiB per replica**
 in the parallel mode, rather than 16 MiB per replica in the single mode;
@@ -367,7 +383,10 @@ On Node 4 (MN4), with all other MuCQL suites stopped:
 ~~~bash
 cd ~/rdmaLock && git pull --ff-only
 python3 tools/apt/run_parallel_instances.py --dry-run
-python3 tools/apt/run_parallel_instances.py
+python3 tools/apt/run_parallel_instances.py --workers-per-cn 8
+
+# To reproduce the previous 10-client baseline instead:
+# python3 tools/apt/run_parallel_instances.py --workers-per-cn 5
 ~~~
 
 Default: **three repetitions of a single-leader round followed by a
@@ -384,8 +403,8 @@ that replicated ordering and coordinator CPU can scale using multiple
 logical leaders, *but does not measure genuine sharded-lock correctness*.
 A <1× result may mean RNIC/CPU/MR contention from multiple processes
 rather than an impossibility of sharding. The baseline is newly measured
-at ten workers and must not be compared directly to the older eight-worker
-one-key or 100K-key figures. Fixed logs still fail rather than recycle
+at sixteen workers by default and must not be compared directly to
+the older ten- or eight-worker measurements. Fixed logs still fail rather than recycle
 if a leader exhausts its registered accepted slots.
 
 ## CPU polling and early handoff connection experiment

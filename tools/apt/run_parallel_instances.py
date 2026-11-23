@@ -5,10 +5,13 @@ This is a capacity microexperiment, NOT one sharded lock service.  Each instance
 owns a disjoint logical lock namespace, an independent Paxos log/QP and data MR.
 All instances share the original physical CNs, data MN, replicas and RNICs.
 
-A one-vs-five comparison holds total closed-loop client workers constant at 10:
-single has 5 workers/CN, five have 1 worker/CN * 5 instances.  Both have
-100,000 total keys (100,000 vs 5*20,000). Coordinators on MN4 wait for an
-absolute Unix-nanosecond GO gate so their measurement intervals overlap.
+A one-vs-five comparison holds total closed-loop client workers constant:
+by default 8 workers/CN (16 total) in the single-leader case, distributed
+as [2,2,2,1,1] workers/CN across five independent instances. The 100,000
+total keys are partitioned *in proportion to client count*, so that
+the global key-request distribution remains uniform in both configurations.
+Coordinators on MN4 wait for an absolute Unix-nanosecond GO gate so their
+measurement intervals overlap.
 """
 from __future__ import annotations
 
@@ -33,30 +36,59 @@ import run_suite as runner
 
 INSTANCE_COUNT=5
 TOTAL_KEYS=100000
-PER_CN_WORKERS=5
+DEFAULT_PER_CN_WORKERS=8
 PORT_STRIDE=200
 GO_SKEW_LIMIT_NS=100_000_000
 
 
-def make_cases(topo, count, repetition, gate):
-    """One or five independent groups, ten TOTAL workers and keys in both."""
+def worker_allocation(count,workers_per_cn):
+    """Balance physical processes across leaders without oversubscribing CNs."""
     if count not in (1,INSTANCE_COUNT):
         raise ValueError("expected one or five leaders")
+    if type(workers_per_cn) is not int or not 5<=workers_per_cn<=16:
+        raise ValueError("workers-per-cn must be an integer 5..16")
+    q,r=divmod(workers_per_cn,count)
+    result=[q+(i<r) for i in range(count)]
+    assert min(result)>=1 and sum(result)==workers_per_cn
+    return result
+
+
+def key_allocation(workers):
+    """Proportional keys give a globally uniform workload with unequal shards."""
+    total=sum(workers)
+    if total<=0:
+        raise ValueError("no workers")
+    allocations=[]
+    prefix=0
+    for w in workers:
+        low=TOTAL_KEYS*prefix//total
+        prefix+=w
+        allocations.append(TOTAL_KEYS*prefix//total-low)
+    assert sum(allocations)==TOTAL_KEYS and min(allocations)>=1
+    return allocations
+
+
+def make_cases(topo, count, repetition, gate,
+               workers_per_cn=DEFAULT_PER_CN_WORKERS):
+    """One or five independent groups with constant client/key totals."""
+    workers=worker_allocation(count,workers_per_cn)
+    keys=key_allocation(workers)
     if type(repetition) is not int or repetition<1:
         raise ValueError("invalid repetition")
     if not isinstance(gate,str) or not 1<=len(gate)<=96 or not all(
             x.isascii() and (x.isalnum() or x in "_-") for x in gate):
         raise ValueError("invalid gate token")
     if len(topo['clients'])<2 or any(
-            cn.get('cores',8)<PER_CN_WORKERS for cn in topo['clients'][:2]):
-        raise ValueError("both CNs require at least five usable cores")
+            type(cn.get('cores',8)) is not int or
+            cn.get('cores',8)<workers_per_cn for cn in topo['clients'][:2]):
+        raise ValueError(f"both CNs require {workers_per_cn} usable cores")
     result=[]
     for i in range(count):
         spec={
             'name':'parallel-leaders-'+str(count), 'kind':'live_e2e',
             'profiles':['raw'], 'transports':['rdma'],
-            'cn_counts':[2], 'workers_per_cn':[PER_CN_WORKERS//count],
-            'locks':[TOTAL_KEYS//count], 'distributions':['uniform'],
+            'cn_counts':[2], 'workers_per_cn':[workers[i]],
+            'locks':[keys[i]], 'distributions':['uniform'],
             'probes':[0], 'work_ns':[0], 'data_ops':[1],
             'rx_idle_us':[0], 'handoff_idle_us':[0],
             'handoff_preconnect':[0], 'warmup_ms':0,
@@ -135,7 +167,8 @@ def wait_all_ready(executor, mn4, session, cases, futures, seconds=105):
         time.sleep(.25)
 
 
-def combine(count,repetition,rows):
+def combine(count,repetition,rows,
+            workers_per_cn=DEFAULT_PER_CN_WORKERS):
     if len(rows)!=count or any(row['status']!='PASS' for row in rows):
         raise ValueError('cannot aggregate missing/failed instances')
     starts=[int(row['go_epoch_ns']) for row in rows]
@@ -146,7 +179,7 @@ def combine(count,repetition,rows):
         raise ValueError('measurement windows differ')
     workers=sum(int(row['worker_processes']) for row in rows)
     keys=sum(int(row['lock_count']) for row in rows)
-    if workers!=10 or keys!=TOTAL_KEYS:
+    if workers!=2*workers_per_cn or keys!=TOTAL_KEYS:
         raise ValueError('client or keyspace mismatch between modes')
     rates=[float(row['goodput_ops_per_sec']) for row in rows]
     return dict(repetition=repetition,instances=count,workers_total=workers,
@@ -160,9 +193,10 @@ def combine(count,repetition,rows):
                 status='PASS')
 
 
-def run_group(executor,topo,sha,session,root,count,rep,timeout):
+def run_group(executor,topo,sha,session,root,count,rep,timeout,
+              workers_per_cn=DEFAULT_PER_CN_WORKERS):
     token=f'{session}-p{count}-r{rep}'
-    cases=make_cases(topo,count,rep,token)
+    cases=make_cases(topo,count,rep,token,workers_per_cn)
     port_sets(topo,cases)
     node=topo['data_mn']
     print(f'  {count} leader(s), repetition {rep}: starting {count} independent job(s)',flush=True)
@@ -214,7 +248,7 @@ def run_group(executor,topo,sha,session,root,count,rep,timeout):
         clear_gate(executor,node,token)
     if len(collected)!=count or any(r['status']!='PASS' for r in collected):
         raise RuntimeError('parallel group contains failed or incomplete instances')
-    return collected,combine(count,rep,collected)
+    return collected,combine(count,rep,collected,workers_per_cn)
 
 
 def main():
@@ -225,21 +259,27 @@ def main():
     p.add_argument('--ssh-user',default=os.environ.get('USER',''))
     p.add_argument('--remote-dir',default='rdmaLock')
     p.add_argument('--repetitions',type=int,default=3)
+    p.add_argument('--workers-per-cn',type=int,default=DEFAULT_PER_CN_WORKERS,
+                   help='total worker processes on EACH CN (default 8); '
+                        'distributed among five leaders without oversubscription')
     p.add_argument('--timeout',type=int,default=180)
     p.add_argument('--dry-run',action='store_true')
     p.add_argument('--no-auto-deps',action='store_true')
     args=p.parse_args()
     if not 1<=args.repetitions<=10 or not 60<=args.timeout<=3600:
         raise ValueError('repetitions must be 1..10, timeout 60..3600')
+    worker_allocation(INSTANCE_COUNT,args.workers_per_cn)
     topo,_=cluster.read(args.topology)
     if len(topo['clients'])<2:
         raise ValueError('need two CNs')
     for count in (1,INSTANCE_COUNT):
-        cases=make_cases(topo,count,1,'DRY_RUN_GATE')
+        cases=make_cases(topo,count,1,'DRY_RUN_GATE',args.workers_per_cn)
         port_sets(topo,cases)
         print(f'PLAN: {count} leaders, {len(cases)} jobs; '+
-              f'{PER_CN_WORKERS//count} workers per CN per job; '+
-              f'{TOTAL_KEYS//count} independent keys per job')
+              f'{2*args.workers_per_cn} total workers; '+
+              f'{TOTAL_KEYS} total independent keys; '+
+              f'workers/CN/instance={[c["workers_per_cn"] for c in cases]}; '+
+              f'keys/instance={[c["locks"] for c in cases]}')
         for c in cases:
             cfg=runner.case_topology(topo,c,4101)
             print(f'  {c["id"]} ports={cfg["ports"]}')
@@ -273,7 +313,9 @@ def main():
                 raise
         (root/'manifest.json').write_text(json.dumps({
             'commit':sha,'note':'independent MuCQL instances, NOT an integrated sharded lock',
-            'one_vs_five_total_workers':10,'total_keys':TOTAL_KEYS,
+            'one_vs_five_total_workers':2*args.workers_per_cn,
+            'workers_per_cn':args.workers_per_cn,
+            'total_keys':TOTAL_KEYS,'key_distribution':'proportional to workers',
             'measured_ms':1000,'repetitions':args.repetitions,
             'port_stride':PORT_STRIDE},indent=2))
         cols=runner.COLUMNS+['parallel_instances','instance_id','repetition','instance_key_count']
@@ -289,7 +331,8 @@ def main():
             # long-term cluster load drift; never overlap these two modes.
             for rep in range(1,args.repetitions+1):
                 for count in (1,INSTANCE_COUNT):
-                    rows,agg=run_group(executor,topo,sha,session,root,count,rep,args.timeout)
+                    rows,agg=run_group(executor,topo,sha,session,root,count,rep,
+                                       args.timeout,args.workers_per_cn)
                     for row in rows: rw.writerow(row)
                     aw.writerow(agg);f.flush();af.flush()
                     all_aggregates.append(agg)

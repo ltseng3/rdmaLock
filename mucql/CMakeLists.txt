@@ -30,6 +30,13 @@ target_link_libraries(mucql_async_pipeline_test PRIVATE mucql_core Threads::Thre
 target_compile_options(mucql_async_pipeline_test PRIVATE -UNDEBUG -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME mucql_async_phase2_pipeline COMMAND mucql_async_pipeline_test)
 
+# A late JOIN must not wait for an already certified predecessor's RDMA
+# handoff QP; an uncertified predecessor still requires a CAS handoff.
+add_executable(mucql_live_handoff_policy_test tests/test_live_handoff_policy.cpp)
+target_link_libraries(mucql_live_handoff_policy_test PRIVATE mucql_core Threads::Threads)
+target_compile_options(mucql_live_handoff_policy_test PRIVATE -UNDEBUG -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME mucql_certified_late_handoff_policy COMMAND mucql_live_handoff_policy_test)
+
 
 add_executable(mucql_online_core_test tests/test_online_core.cpp)
 target_link_libraries(mucql_online_core_test PRIVATE mucql_core Threads::Threads)
@@ -219,6 +226,19 @@ set_tests_properties(mucql_live_hot_raw mucql_live_hot_optimized
                  TIMEOUT 45 RUN_SERIAL TRUE)
   set_tests_properties(mucql_live_rdma_multikey_delayed_mock PROPERTIES
       PASS_REGULAR_EXPRESSION "phase2_overlap_submissions=[1-9][0-9]*")
+
+  # Both actual coordinator paths must route certified late successors
+  # directly while retaining the old CAS path for active predecessors.
+  add_test(NAME mucql_live_rdma_certified_late_start_mock
+      COMMAND mucql_live_mock_test 4 16 1 1 1 2 0 1)
+  add_test(NAME mucql_live_rdma_certified_late_start_async_mock
+      COMMAND mucql_live_mock_test 4 16 4 16 1 2 0 1)
+  set_tests_properties(mucql_live_rdma_certified_late_start_mock
+      PROPERTIES ENVIRONMENT "MUCQL_CN_TRANSPORT=rdma;MUCQL_CERTIFIED_LATE_START=1;MUCQL_HANDOFF_PRECONNECT=0"
+                 TIMEOUT 45 RUN_SERIAL TRUE)
+  set_tests_properties(mucql_live_rdma_certified_late_start_async_mock
+      PROPERTIES ENVIRONMENT "MUCQL_CN_TRANSPORT=rdma;MUCQL_MULTI_KEY_PIPELINE=1;MUCQL_CERTIFIED_LATE_START=1;MUCQL_HANDOFF_PRECONNECT=0"
+                 TIMEOUT 45 RUN_SERIAL TRUE)
 
   # The synchronized multi-instance GO gate is opt-in and leaves normal
   # benchmark latency accounting unchanged when unset.

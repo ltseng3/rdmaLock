@@ -16,10 +16,14 @@ class Profile:
     batch_wait_us: int = 0
     # Explicit opt-in. Existing raw and full profiles remain synchronous.
     multi_key_pipeline: int = 0
+    # Optional coordinator-certified direct START after a verified predecessor
+    # release, avoiding unnecessary on-demand predecessor handoff QP creation.
+    certified_late_start: int = 0
 
 
 PROFILES = {
     'raw': Profile(),
+    'raw_certified_late_start': Profile(certified_late_start=1),
     # Matched control: same batching knobs but legacy single-key scheduling.
     'multi_key_control': Profile(join_aggregate=16,phase2_window=16,
                                  batch_wait_us=25),
@@ -31,6 +35,9 @@ PROFILES = {
     # sleep the receive thread merely to collect more independent JOINs.
     'multi_key_async_nowait': Profile(join_aggregate=16,phase2_window=16,
                                       batch_wait_us=0,multi_key_pipeline=1),
+    'multi_key_async_nowait_certified_late_start': Profile(
+        join_aggregate=16,phase2_window=16,batch_wait_us=0,
+        multi_key_pipeline=1,certified_late_start=1),
     'join_control': Profile(batch_wait_us=25),
     'join_aggregation': Profile(join_aggregate=16, batch_wait_us=25),
     'phase2_control': Profile(join_aggregate=16, batch_wait_us=25),

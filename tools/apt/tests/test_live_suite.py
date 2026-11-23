@@ -316,6 +316,51 @@ class LiveSuiteTests(unittest.TestCase):
             self.assertEqual(b['prepare_range'],1)
             self.assertEqual(b['lookahead'],2)
 
+    def test_certified_late_successor_focus_and_routing_counters(self):
+        spec=json.loads((HERE/'suites/live_certified_late_start_focus.json').read_text())
+        cases=runner.expand_suite(spec,TOPO)
+        self.assertEqual(len(cases),8) # 4 profiles x 2 repeats
+        self.assertEqual({c['profile'] for c in cases},
+                         {'raw','raw_certified_late_start',
+                          'multi_key_async_nowait',
+                          'multi_key_async_nowait_certified_late_start'})
+        for c in cases:
+            cfg=runner.case_topology(TOPO,c,4101)
+            self.assertEqual(cluster.validate(cfg),16)
+            self.assertEqual(c['locks'],100000)
+            self.assertEqual(c['measure_ms'],500)
+            self.assertEqual(c['rx_idle_us'],5)
+            self.assertEqual(c['handoff_preconnect'],0)
+            self.assertEqual(c['transport'],'rdma')
+            b=cfg['benchmark']
+            expected=int(c['profile'].endswith('_certified_late_start'))
+            self.assertEqual(b['certified_late_start'],expected)
+            self.assertEqual(b['multi_key_pipeline'],
+                             int(c['profile'].startswith('multi_key_async')))
+            self.assertEqual(b['batch_wait_us'],0)
+        suffix=(' certified_late_start=1 initial_starts=4'
+                ' certified_successor_starts=50 handoff_notifications=358')
+        result=runner.extract_live(LIVE_LINE+suffix)
+        self.assertEqual(result['certified_successor_starts'],'50')
+        self.assertEqual(result['handoff_notifications'],'358')
+        for key in ('certified_late_start','initial_starts',
+                    'certified_successor_starts','handoff_notifications'):
+            self.assertIn(key,runner.COLUMNS)
+        valid_off=(' certified_late_start=0 initial_starts=4'
+                   ' certified_successor_starts=0 handoff_notifications=408')
+        self.assertEqual(runner.extract_live(LIVE_LINE+valid_off)['certified_late_start'],'0')
+        for bad in (
+            suffix.replace('certified_successor_starts=50',
+                           'certified_successor_starts=51'),
+            suffix.replace('certified_late_start=1','certified_late_start=2'),
+            suffix.replace('handoff_notifications=358',''),
+            valid_off.replace('certified_successor_starts=0',
+                              'certified_successor_starts=1'),
+        ):
+            with self.subTest(bad=bad):
+                with self.assertRaisesRegex(ValueError,'certified successor'):
+                    runner.extract_live(LIVE_LINE+bad)
+
     def test_async_phase2_output_proves_actual_cross_key_windows(self):
         suffix=(' multi_key_pipeline=1 cross_key_join_batches=4'
                 ' cross_key_prepare_batches=3 phase2_windows_posted=12'

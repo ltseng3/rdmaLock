@@ -73,7 +73,8 @@ def validate(doc):
         if type(shots) is not int or shots<1 or shots>32:
             raise ValueError("live data_ops must be an integer 1..32 (8-byte completed RDMA WRITEs)")
         for knob,limit in (("rx_idle_us",100),("handoff_idle_us",100),
-                           ("handoff_preconnect",1),("multi_key_pipeline",1)):
+                           ("handoff_preconnect",1),("multi_key_pipeline",1),
+                           ("certified_late_start",1)):
             value=bench.get(knob,1 if knob=="handoff_preconnect" else 0)
             if type(value) is not int or not 0<=value<=limit:
                 raise ValueError(f"live {knob} must be integer 0..{limit}")
@@ -223,6 +224,8 @@ def main():
         env["MUCQL_HANDOFF_IDLE_US"] = str(doc["benchmark"].get("handoff_idle_us",0))
         env["MUCQL_HANDOFF_PRECONNECT"] = str(doc["benchmark"].get("handoff_preconnect",1))
         env["MUCQL_MULTI_KEY_PIPELINE"] = str(doc["benchmark"].get("multi_key_pipeline",0))
+        env["MUCQL_CERTIFIED_LATE_START"] = str(
+            doc["benchmark"].get("certified_late_start",0))
         if args.role=="coordinator" and doc["benchmark"].get("start_gate"):
             env["MUCQL_START_GATE_FILE"]=str(
                 ROOT/"results"/"automation"/"gates"/(doc["benchmark"]["start_gate"]+".go"))

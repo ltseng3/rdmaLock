@@ -2,6 +2,7 @@
 // One outstanding JOIN per worker. Every ticket is a committed JOIN + PREPARE;
 // predecessors receive the prepared successor and issue one-sided RDMA handoff.
 #include "mucql/core.hpp"
+#include "mucql/live_handoff_policy.hpp"
 #include "mucql/paxos.hpp"
 #include "mucql/verbs_paxos.hpp"
 #include "mucql/verbs_release.hpp"
@@ -56,6 +57,10 @@ bool join_log_has_room(uint64_t decided,uint64_t incoming,uint64_t slots){
          slots-decided-incoming>kPrepareLogReserve;
 }
 enum MsgType:uint64_t {Join=1,Done=2,Quiescent=3,TicketReady=4,HandoffReady=5,Go=6,Stop=7,Finish=8};
+// Only on TicketReady: coordinator has certified that the ticket may START
+// without a predecessor-to-successor RDMA CAS. Done.flags bit 0 is separate
+// and continues to mean that the sample falls within the measurement window.
+constexpr uint64_t kTicketStartAuthorized=1;
 struct TicketWire {uint64_t lock,client,request,position,grant,predecessor,deadline;};
 struct Message {uint64_t magic,type,flags,latency_ns,admit_ns,wait_ns;TicketWire ticket;};
 struct Hello {uint64_t magic,index,port;char ip[64];};
@@ -196,6 +201,7 @@ int coordinator(int argc,char**argv){
   const auto handoff_idle_us=env_number("MUCQL_HANDOFF_IDLE_US",0,100);
   const auto handoff_preconnect=env_number("MUCQL_HANDOFF_PRECONNECT",1,1);
   const bool multi_key_pipeline=env_number("MUCQL_MULTI_KEY_PIPELINE",0,1)!=0;
+  const bool certified_late_start=env_number("MUCQL_CERTIFIED_LATE_START",0,1)!=0;
   int listenfd=listen_tcp(port);
   std::cout<<"LIVE coordinator listening tcp="<<port<<" workers="<<o.workers
            <<" locks="<<o.lock_count<<" max_ops="<<o.max_ops<<" transport="<<(control_rdma?"rdma":"tcp")<<std::endl;
@@ -280,6 +286,7 @@ int coordinator(int argc,char**argv){
   uint64_t actual_join_batches=0,join_batch_sum=0;
   uint64_t join_key_visits=0,prepare_key_visits=0;
   uint64_t cross_key_join_batches=0,cross_key_prepare_batches=0;
+  uint64_t initial_starts=0,certified_successor_starts=0,handoff_notifications=0;
   std::vector<uint64_t> latency,admission,waits;
   // The ordering thread posts up to phase2_window independent log entries
   // before waiting for quorum CQEs. The event loop remains free to receive
@@ -394,6 +401,28 @@ int coordinator(int argc,char**argv){
   std::map<LockId,std::vector<Ticket>> known;
   std::map<LockId,size_t> progress_frontier;
   std::map<GrantId,Ticket> granted;std::set<GrantId> completed;
+  auto notify_prepared=[&](const Ticket& t){
+    // Only a previously read-and-verified release marker, tied to the exact
+    // predecessor grant and FIFO position, permits a non-head direct START.
+    // In particular, a release still pending in the receive queue is NOT
+    // enough to bypass the handoff. The normal CAS handles that race.
+    const std::optional<Ticket> pred=t.position?leader.ticket(t.lock,t.position-1):
+                                             std::optional<Ticket>{};
+    const auto route=choose_prepared_successor_route(
+        t,pred,completed,certified_late_start);
+    Message ready=message(TicketReady,t);
+    if(route!=PreparedSuccessorRoute::DirectHandoff)
+      ready.flags=kTicketStartAuthorized;
+    granted[t.grant_id]=t;
+    send_to(t.client-1,ready);
+    if(route==PreparedSuccessorRoute::HeadStart)++initial_starts;
+    else if(route==PreparedSuccessorRoute::CertifiedLateStart)
+      ++certified_successor_starts;
+    else{
+      ++handoff_notifications;
+      send_to(pred->client-1,message(HandoffReady,t));
+    }
+  };
   std::vector<bool> quiesced(o.workers,false);size_t quiescent_count=0;
   bool stopped=false;
   try{
@@ -431,16 +460,7 @@ int coordinator(int argc,char**argv){
             last_prepared[t.lock]=std::max(last_prepared[t.lock],t.position+1);
           prepare_records+=last_prepared.size();
           if(last_prepared.size()>1)cross_key_prepare_batches++;
-          for(const auto& t:result.tickets){
-            granted[t.grant_id]=t;
-            send_to(t.client-1,message(TicketReady,t));
-            if(t.position>0){
-              const auto pred=leader.ticket(t.lock,t.position-1);
-              if(!pred||!pred->deadline||pred->grant_id!=t.predecessor_id)
-                fail("pipelined prepared successor without prepared predecessor");
-              send_to(pred->client-1,message(HandoffReady,t));
-            }
-          }
+          for(const auto& t:result.tickets)notify_prepared(t);
           // With prepare_range=1 a hot key may need several PREPARE
           // records to fill its lookahead. Re-arm only locks that actually
           // prepared a position and have more committed JOIN tickets.
@@ -599,16 +619,7 @@ int coordinator(int argc,char**argv){
           auto batch=leader.prepare(lock,o.prepare_range);
           if(batch.empty())break;
           prepare_records++;
-          for(const auto& t:batch){
-            granted[t.grant_id]=t;
-            send_to(t.client-1,message(TicketReady,t));
-            if(t.position>0){
-              const auto pred=leader.ticket(lock,t.position-1);
-              if(!pred||!pred->deadline||pred->grant_id!=t.predecessor_id)
-                fail("prepared successor without prepared predecessor");
-              send_to(pred->client-1,message(HandoffReady,t));
-            }
-          }
+          for(const auto& t:batch)notify_prepared(t);
         }
       }
       if(multi_key_pipeline&&!prepared_batch.locks.empty())
@@ -620,6 +631,9 @@ int coordinator(int argc,char**argv){
          pending_tasks==0&&pending_joins==0&&waiting.empty())break;
     }
     stop_ordering();
+    if(initial_starts!=known.size() ||
+       initial_starts+certified_successor_starts+handoff_notifications!=joined)
+      fail("prepared successor routing/completion accounting mismatch");
     // Out of stopwatch: independently verify every release, last protected
     // write per lock, and owner probe. No warmup request was precommitted.
     for(const auto& [grant,t]:granted){if(!completed.count(grant)||release.read_slot(grant)!=grant)
@@ -643,6 +657,10 @@ int coordinator(int argc,char**argv){
       <<" replenish_threshold="<<o.replenish_threshold<<" batch_wait_us="<<o.batch_wait_us<<" join_batches="<<actual_join_batches
       <<" actual_join_batch_mean="<<(actual_join_batches?double(join_batch_sum)/actual_join_batches:0)
       <<" prepare_records="<<prepare_records
+      <<" certified_late_start="<<(certified_late_start?1:0)
+      <<" initial_starts="<<initial_starts
+      <<" certified_successor_starts="<<certified_successor_starts
+      <<" handoff_notifications="<<handoff_notifications
       <<" multi_key_pipeline="<<(multi_key_pipeline?1:0)
       <<" cross_key_join_batches="<<cross_key_join_batches
       <<" cross_key_prepare_batches="<<cross_key_prepare_batches
@@ -736,13 +754,22 @@ int worker(int argc,char**argv){
   std::unique_ptr<VerbsReleaseClient> probe;
   if(o.probe)probe=std::make_unique<VerbsReleaseClient>(host_of(cfg.data_host),uint16_t(cfg.data_port),release_opts(device,release_slots(o)));
   if(release.slots()<release_slots(o))fail("data server lacks LIVE slots");
-  std::mutex mu;std::condition_variable cv;std::deque<Ticket> assigned,successors;
+  struct ReadyTicket {Ticket ticket;bool start_authorized;};
+  std::mutex mu;std::condition_variable cv;
+  std::deque<ReadyTicket> assigned;std::deque<Ticket> successors;
   std::set<GrantId> retired;
   std::string stream_error;bool go=false,stop=false,finished=false;
   std::thread reader([&]{try{
     for(;;){Message m{};channel.recv(&m,sizeof(m));if(m.magic!=kMagic)fail("bad coordinator message");
       {std::lock_guard<std::mutex> lock(mu);
-        if(m.type==TicketReady){auto t=unpack(m.ticket);if(t.client!=id+1||t.grant_id>=slots)fail("foreign/invalid ticket");assigned.push_back(t);}
+        if(m.type==TicketReady){
+          auto t=unpack(m.ticket);
+          if(t.client!=id+1||t.grant_id>=slots||
+             (m.flags&~kTicketStartAuthorized)||
+             (t.position==0 && !(m.flags&kTicketStartAuthorized)))
+            fail("foreign/invalid ticket authorization");
+          assigned.push_back({t,(m.flags&kTicketStartAuthorized)!=0});
+        }
         else if(m.type==HandoffReady){auto t=unpack(m.ticket);if(t.grant_id>=slots||!t.predecessor_id)fail("invalid handoff");successors.push_back(t);}
         else if(m.type==Go)go=true;
         else if(m.type==Stop)stop=true;
@@ -803,17 +830,21 @@ int worker(int argc,char**argv){
       auto send_at=ClockType::now();
       Ticket asked{};asked.client=id+1;asked.lock=locks.next();asked.request=++request;
       {auto join_msg=message(Join,asked);channel.send(&join_msg,sizeof(join_msg));}
-      Ticket t;
+      ReadyTicket ready;
       {std::unique_lock<std::mutex> lock(mu);
         cv.wait(lock,[&]{return !assigned.empty()||!stream_error.empty();});
         if(!stream_error.empty())fail(stream_error);
-        t=assigned.front();assigned.pop_front();}
+        ready=assigned.front();assigned.pop_front();}
+      const Ticket& t=ready.ticket;
       if(t.client!=id+1||t.request!=request||t.lock!=asked.lock)fail("out-of-order ticket response");
       auto admit_at=ClockType::now();
       client.on_prepared(t);
       uint64_t handoff_wait_ns=0;
-      if(t.position==0){if(!client.activate_start(t,true,EndlessClock{}))fail("head start rejected");}
-      else{
+      if(ready.start_authorized){
+        // Head, or non-head with an exact certified predecessor release.
+        if(!client.activate_start(t,true,EndlessClock{}))fail("certified start rejected");
+      }else{
+        if(!t.position)fail("uncertified head ticket");
         auto wait_from=ClockType::now();
         uint32_t handoff_polls=0;
         for(;;){auto current=inbox->slot_value(t.grant_id);

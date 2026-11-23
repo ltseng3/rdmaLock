@@ -48,7 +48,9 @@ COLUMNS = ['case', 'scenario', 'trial', 'kind', 'measurement_scope', 'comparable
            'paxos_slots', 'max_ops', 'join_aggregate', 'phase2_window', 'prepare_range',
            'lookahead', 'replenish_threshold', 'batch_wait_us', 'measured', 'join_batches',
            'actual_join_batch_mean', 'prepare_records',
-           'multi_key_pipeline','cross_key_join_batches','cross_key_prepare_batches',
+           'multi_key_pipeline','certified_late_start','initial_starts',
+           'certified_successor_starts','handoff_notifications',
+           'cross_key_join_batches','cross_key_prepare_batches',
            'phase2_windows_posted','phase2_multi_record_windows','phase2_max_window',
            'phase2_records_posted',
            'phase2_max_inflight_batches','phase2_max_inflight_records','phase2_overlap_submissions',
@@ -268,6 +270,18 @@ def extract_live(text):
             int(result['prepare_key_visits'])>int(result['joins'])+int(result['completed'])+refill_visits or
             int(result['distinct_keys_seen'])>int(result['joins'])):
             raise ValueError('LIVE dirty-key accounting inconsistent')
+    handoff=('certified_late_start','initial_starts','certified_successor_starts',
+             'handoff_notifications')
+    if any(k in result for k in handoff):
+        if (not all(k in result for k in handoff) or
+            any(not result[k].isdigit() for k in handoff)):
+            raise ValueError('incomplete certified successor routing counters')
+        enabled,head,fast,fallback=(int(result[k]) for k in handoff)
+        if (enabled not in (0,1) or (not enabled and fast) or
+            head+fast+fallback!=int(result['joins']) or
+            ('distinct_keys_seen' in result and
+             head!=int(result['distinct_keys_seen']))):
+            raise ValueError('invalid certified successor routing counters')
     phase2=('multi_key_pipeline','cross_key_join_batches',
             'cross_key_prepare_batches','phase2_windows_posted',
             'phase2_multi_record_windows','phase2_max_window',
@@ -481,6 +495,9 @@ def benchmark(ex, case, topology, commit, session, run_root, ballot, timeout):
             if 'multi_key_pipeline' in summary:
                 if int(summary['multi_key_pipeline'])!=doc['benchmark'].get('multi_key_pipeline',0):
                     raise ValueError('LIVE reported cross-key pipeline mode differs')
+            if 'certified_late_start' in summary:
+                if int(summary['certified_late_start'])!=doc['benchmark'].get('certified_late_start',0):
+                    raise ValueError('LIVE reported certified late-start mode differs')
         elif int(summary['committed']) != case['positions'] or int(summary['batch']) != case['batch']:
             raise ValueError('ordering result does not match requested case')
         row = {key: '' for key in COLUMNS}
@@ -506,7 +523,9 @@ def benchmark(ex, case, topology, commit, session, run_root, ballot, timeout):
                        'data_writes_measured'):
                 row[k]=summary[k]
             for k in ('join_key_visits','prepare_key_visits','distinct_keys_seen','go_epoch_ns',
-                      'multi_key_pipeline','cross_key_join_batches','cross_key_prepare_batches',
+                      'multi_key_pipeline','certified_late_start','initial_starts',
+                      'certified_successor_starts','handoff_notifications',
+                      'cross_key_join_batches','cross_key_prepare_batches',
                       'phase2_windows_posted','phase2_multi_record_windows',
                       'phase2_max_window','phase2_records_posted',
                       'phase2_max_inflight_batches','phase2_max_inflight_records',

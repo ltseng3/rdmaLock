@@ -1,0 +1,119 @@
+"""Fast, network-free checks for the independent-leader capacity experiment."""
+import json
+import sys
+import unittest
+from pathlib import Path
+
+HERE=Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(HERE))
+import run_parallel_instances as experiment
+import run_suite as suite
+import isolated_cluster as cluster
+
+TOPO=json.loads((HERE/'topology.example.json').read_text())
+
+
+class ParallelInstanceTests(unittest.TestCase):
+    def test_constant_total_workers_and_partitioned_keyspace(self):
+        for n in (1,5):
+            with self.subTest(instances=n):
+                cases=experiment.make_cases(TOPO,n,1,'TEST_GO')
+                self.assertEqual(len(cases),n)
+                self.assertEqual(len({c['id'] for c in cases}),n)
+                self.assertEqual(sum(c['locks'] for c in cases),100000)
+                self.assertEqual(sum(c['workers_per_cn']*c['cn_count']
+                                     for c in cases),10)
+                self.assertEqual({c['measure_ms'] for c in cases},{1000})
+                self.assertEqual({c['warmup_ms'] for c in cases},{0})
+                self.assertEqual({c['data_ops'] for c in cases},{1})
+                self.assertEqual({c['distribution'] for c in cases},{'uniform'})
+                self.assertEqual({c['transport'] for c in cases},{'rdma'})
+                self.assertEqual({c['profile'] for c in cases},{'raw'})
+                self.assertEqual({c['probe'] for c in cases},{0})
+                self.assertEqual({c['handoff_preconnect'] for c in cases},{0})
+                self.assertEqual({c['paxos_slots'] for c in cases},{131072})
+                self.assertEqual({c['max_ops'] for c in cases},{90000})
+                offsets=[c['port_offset'] for c in cases]
+                self.assertEqual(offsets,[200*i for i in range(n)])
+                for c in cases:
+                    cfg=suite.case_topology(TOPO,c,4101)
+                    self.assertEqual(cfg['benchmark']['start_gate'],'TEST_GO')
+                    self.assertEqual(cluster.validate(cfg),10//n)
+                experiment.port_sets(TOPO,cases)
+
+    def test_refuses_bad_gate_and_insufficient_cores(self):
+        for gate in ('../escape','abc space','', 'x'*97):
+            with self.subTest(gate=gate):
+                with self.assertRaises(ValueError):
+                    experiment.make_cases(TOPO,5,1,gate)
+        for count in (0,2,6):
+            with self.subTest(count=count):
+                with self.assertRaises(ValueError):
+                    experiment.make_cases(TOPO,count,1,'VALID')
+        other=json.loads(json.dumps(TOPO))
+        other['clients'][0]['cores']=4
+        with self.assertRaisesRegex(ValueError,'five usable cores'):
+            experiment.make_cases(other,5,1,'VALID')
+
+    def test_ports_are_disjoint_on_shared_hosts(self):
+        cases=experiment.make_cases(TOPO,5,1,'VALID')
+        ports=experiment.port_sets(TOPO,cases)
+        self.assertEqual(len(ports),5)
+        self.assertEqual(sum(map(len,ports)),len(set().union(*ports)))
+        self.assertEqual([suite.case_topology(TOPO,c,4101)['ports']['ordering']
+                          for c in cases],[39660,39860,40060,40260,40460])
+        duplicated=json.loads(json.dumps(cases))
+        duplicated[1]['port_offset']=0
+        with self.assertRaisesRegex(ValueError,'overlap'):
+            experiment.port_sets(TOPO,duplicated)
+
+    def test_bad_parallel_ports_and_gate_rejected_in_topology(self):
+        c=experiment.make_cases(TOPO,5,1,'VALID')[0]
+        for offset in (-1,100,1200,True):
+            with self.subTest(offset=offset):
+                bad=dict(c,port_offset=offset)
+                with self.assertRaises(ValueError):
+                    suite.case_topology(TOPO,bad,4101)
+        for token in ('../bad','bad/yes','bad.txt','',123):
+            with self.subTest(token=token):
+                bad=dict(c,start_gate=token)
+                with self.assertRaises(ValueError):
+                    suite.case_topology(TOPO,bad,4101)
+
+    def test_aggregate_never_counts_failed_partial_or_unsynchronized(self):
+        def row(i,n,start):
+            return dict(status='PASS',go_epoch_ns=str(start),
+                        worker_processes=10//n,lock_count=100000//n,
+                        measure_ms=1000,warmup_ms=0,goodput_ops_per_sec='12345.5',
+                        latency_p99_ns='150000',measured=12345)
+        start=1800000000000000000
+        for n in (1,5):
+            rows=[row(i,n,start+i*1200000) for i in range(n)]
+            result=experiment.combine(n,1,rows)
+            self.assertEqual(result['instances'],n)
+            self.assertEqual(result['workers_total'],10)
+            self.assertEqual(result['keys_total'],100000)
+            self.assertAlmostEqual(result['aggregate_ops_per_sec'],n*12345.5)
+        for wrong in (
+            [row(i,5,start+i*30000000) for i in range(5)],
+            [dict(row(i,5,start),status='FAIL') if i==2 else row(i,5,start)
+             for i in range(5)],
+            [dict(row(i,5,start),worker_processes=8) if i==0 else row(i,5,start)
+             for i in range(5)],
+            [row(i,5,start) for i in range(4)],
+        ):
+            with self.assertRaises(ValueError):
+                experiment.combine(5,1,wrong)
+
+    def test_go_timestamp_in_live_parser(self):
+        import run_suite
+        from test_live_suite import LIVE_LINE
+        raw=LIVE_LINE+' go_epoch_ns=1800000000000000000'
+        self.assertEqual(run_suite.extract_live(raw)['go_epoch_ns'],
+                         '1800000000000000000')
+        with self.assertRaisesRegex(ValueError,'invalid LIVE GO timestamp'):
+            run_suite.extract_live(LIVE_LINE+' go_epoch_ns=broken')
+
+
+if __name__=='__main__':
+    unittest.main()

@@ -89,6 +89,11 @@ def validate(doc):
                 raise ValueError(f"live benchmark.{name} must be an integer {lo}..{hi}")
         if bench["prepare_range"] > bench["lookahead"] or bench["replenish_threshold"] > bench["lookahead"]:
             raise ValueError("invalid live PREPARE range/trigger vs window")
+        gate=bench.get("start_gate")
+        if gate is not None and (
+            type(gate) is not str or
+            not re.fullmatch(r"[A-Za-z0-9_-]{1,96}",gate)):
+            raise ValueError("start_gate must be a simple unique token")
         if bench["max_ops"] > bench["paxos_slots"] - bench["paxos_slots"] // 64:
             raise ValueError("live operation budget is too close to journal capacity")
     for key, lo, hi in [("positions", total, 3000), ("ballot", 1, 2**63-1),
@@ -217,6 +222,11 @@ def main():
         env["MUCQL_RX_IDLE_US"] = str(doc["benchmark"].get("rx_idle_us",0))
         env["MUCQL_HANDOFF_IDLE_US"] = str(doc["benchmark"].get("handoff_idle_us",0))
         env["MUCQL_HANDOFF_PRECONNECT"] = str(doc["benchmark"].get("handoff_preconnect",1))
+        if args.role=="coordinator" and doc["benchmark"].get("start_gate"):
+            env["MUCQL_START_GATE_FILE"]=str(
+                ROOT/"results"/"automation"/"gates"/(doc["benchmark"]["start_gate"]+".go"))
+        else:
+            env.pop("MUCQL_START_GATE_FILE",None)
     for line in cmds:
         print("MUCQL_IB_PORT=" + str(doc["ib_port"]) + " " + shlex.join(line), flush=True)
     if args.action == "print":

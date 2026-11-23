@@ -40,7 +40,7 @@ SUPPORTED = {'ordering_micro', 'prepared_e2e', 'live_e2e'}
 COLUMNS = ['case', 'scenario', 'trial', 'kind', 'measurement_scope', 'comparable_to_declock',
            'commit', 'cn_nodes', 'worker_processes', 'positions', 'batch', 'probe',
            'work_ns', 'data_ops', 'rx_idle_us', 'handoff_idle_us', 'handoff_preconnect',
-           'data_size_bytes', 'read_ratio', 'data_writes_measured',
+           'data_size_bytes', 'read_ratio', 'data_writes_measured', 'go_epoch_ns',
            'completed', 'verified_markers', 'violations',
            'ordering_seconds', 'handoff_seconds', 'goodput_ops_per_sec',
            'including_ordering_ops_per_sec', 'ordered_entries_per_sec', 'status',
@@ -189,8 +189,14 @@ def case_topology(original, case, ballot):
         doc['clients'] = doc['clients'][:case['cn_count']]
         for cn in doc['clients']:
             cn['workers'] = case['workers_per_cn']
-    # Dedicated automation ports avoid older manually launched 29660/29670 services.
-    doc['ports'] = {'ordering':39660,'data':39670,'coordinator':39700,'worker_base':39711}
+    # Independent instances use separate bootstrap ports on the *same* nodes.
+    # 200-port strides exceed the 64-port worker reservation per instance.
+    offset=case.get('port_offset',0)
+    if type(offset) is not int or not 0<=offset<=1000 or offset%200:
+        raise ValueError('port_offset must be a multiple of 200 in 0..1000')
+    doc['ports'] = {name:base+offset for name,base in
+                    {'ordering':39660,'data':39670,'coordinator':39700,
+                     'worker_base':39711}.items()}
     doc['benchmark'].update(positions=case['positions'], ballot=ballot,
                             order_batch=case['batch'], probe=case['probe'],
                             work_ns=case['work_ns'])
@@ -202,6 +208,8 @@ def case_topology(original, case, ballot):
             rx_idle_us=case['rx_idle_us'],handoff_idle_us=case['handoff_idle_us'],
             handoff_preconnect=case['handoff_preconnect'],
             zipf=int(case['distribution']=='zipf_0.99'), seed=case['seed'])
+        if case.get('start_gate') is not None:
+            doc['benchmark']['start_gate']=case['start_gate']
     cluster.validate(doc)
     return doc
 
@@ -233,6 +241,10 @@ def extract_live(text):
         int(result['handoff_preconnect']) not in (0,1) or
         int(result['data_writes_measured'])!=int(result['measured'])*int(result['data_ops'])):
         raise ValueError('LIVE completion/marker/ownership mismatch')
+    if 'go_epoch_ns' in result and (
+        not result['go_epoch_ns'].isdigit() or
+        int(result['go_epoch_ns'])<1000000000000000):
+        raise ValueError('invalid LIVE GO timestamp')
     # Old revisions lack these extra diagnostics; do not retroactively
     # require them when reading archived benchmark output.
     worklist=('join_key_visits','prepare_key_visits','distinct_keys_seen')
@@ -443,7 +455,7 @@ def benchmark(ex, case, topology, commit, session, run_root, ballot, timeout):
                       'handoff_wait_p99_ns','goodput_ops_per_sec','completed','verified_markers','violations',
                        'data_writes_measured'):
                 row[k]=summary[k]
-            for k in ('join_key_visits','prepare_key_visits','distinct_keys_seen'):
+            for k in ('join_key_visits','prepare_key_visits','distinct_keys_seen','go_epoch_ns'):
                 row[k]=summary.get(k,'')
         elif case['kind'] == 'prepared_e2e':
             for f in ('completed', 'verified_markers', 'violations', 'ordering_seconds',

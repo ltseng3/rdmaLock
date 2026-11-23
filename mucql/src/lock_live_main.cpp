@@ -15,6 +15,7 @@
 #include <cstring>
 #include <deque>
 #include <exception>
+#include <fstream>
 #include <cmath>
 #include <cerrno>
 #include <cstdlib>
@@ -238,7 +239,40 @@ int coordinator(int argc,char**argv){
       cv.notify_one();}
   });
   auto send_to=[&](size_t w,Message m){channels[w]->send(&m,sizeof(m));};
+  // Optional parallel-instance benchmark gate. Every coordinator is on MN4,
+  // so they share a system clock. The gate contains a future Unix-ns start
+  // target, written only after all independent coordinators are RDMA-ready.
+  // No worker runs a measured operation before its coordinator sends GO.
+  if(const char* gate=std::getenv("MUCQL_START_GATE_FILE");gate&&*gate){
+    std::cout<<"LIVE_GO_GATE_READY"<<std::endl;
+    auto deadline=ClockType::now()+std::chrono::seconds(120);
+    for(;;){
+      std::ifstream input(gate);
+      if(input){
+        uint64_t target=0;
+        if(!(input>>target) || target<1000000000000000ULL)
+          fail("invalid start-gate Unix-nanosecond timestamp");
+        auto now_ns=[]{
+          return uint64_t(std::chrono::duration_cast<ns>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+        };
+        if(now_ns()>target+100000000ULL)
+          fail("parallel GO start deadline was missed");
+        while(now_ns()<target){
+          if(target-now_ns()>2000000ULL)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+          else std::this_thread::yield();
+        }
+        break;
+      }
+      if(errno!=ENOENT)fail("cannot open parallel start gate");
+      if(ClockType::now()>=deadline)fail("parallel start gate timeout");
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+  }
   auto start=ClockType::now();
+  const auto go_epoch_ns=std::chrono::duration_cast<ns>(
+    std::chrono::system_clock::now().time_since_epoch()).count();
   for(size_t w=0;w<o.workers;w++)send_to(w,message(Go));
   auto end=start+std::chrono::milliseconds(o.warmup_ms+o.measure_ms);
   uint64_t joined=0,done=0,measured=0,prepare_records=0;
@@ -418,6 +452,7 @@ int coordinator(int argc,char**argv){
       <<" rx_idle_us="<<rx_idle_us
       <<" handoff_idle_us="<<handoff_idle_us
       <<" handoff_preconnect="<<handoff_preconnect
+      <<" go_epoch_ns="<<go_epoch_ns
       <<" transport="<<(control_rdma?"rdma":"tcp")
       <<" probe="<<o.probe<<" work_ns="<<o.work_ns<<std::endl;
     for(size_t w=0;w<o.workers;w++)send_to(w,message(Finish));

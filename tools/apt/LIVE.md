@@ -327,6 +327,67 @@ the centralized coordinator's per-JOIN quorum commits and per-Done
 RDMA release-marker reads before considering sharded Mu journals.
 This is *not* a DecLock throughput comparison.
 
+## One leader vs five parallel independent leaders — fast capacity diagnostic
+
+**This does NOT implement per-key Mu sharding.** Five distinct MuCQL
+services operate independent key namespaces, with disjoint accepted logs,
+RDMA QPs, MN4 data regions, TCP/worker ports and log directories.
+They share the SAME three physical replica hosts, MN4 host, two CN hosts,
+RNICs, and CPU budgets. No independent instance can acquire a lock
+belonging to another instance; there is no unified client-facing lock API.
+
+Compare **equal 10-worker total client concurrency and 100,000 total keys**:
+
+| Mode | Instances | Workers / CN / instance | Keys / instance | Total clients |
+| --- | ---: | ---: | ---: | ---: |
+| Single leader | 1 | 5 | 100000 | 10 |
+| Parallel independent leaders | 5 | 1 | 20000 | 10 |
+
+Both are raw profiles, uniform distribution, one completed 8-byte data
+RDMA WRITE per exclusive lock cycle, zero warmup, 1000ms measurement,
+131072 accepted slots and 90000 max_ops per instance, no polling backoffs,
+no preconnection, zero probes. The ten workers are bound by the *same*
+two CNs' configured 8-core budget; the five-leader mode does not launch
+40 workers or compare with the historical eight-worker baseline.
+
+The independent accepted-log memory cost is **5 × 16 MiB per replica**
+in the parallel mode, rather than 16 MiB per replica in the single mode;
+five distinct QPs/servers also consume more RNIC resources. Each instance
+uses a separate port range at 39660/39670/39700/39711 + 200*i.
+
+A future Unix-nanosecond start gate is written **on MN4 only after all
+coordinators and CN RDMA channels report GO-ready**. All five services
+then start measured work on the same MN4 clock. A group FAILS if any
+instance reports incomplete work or the GO timestamps differ by over
+100 ms. Only complete, verified PASS instance goodput is summed, with
+the worst *instance* P99 reported rather than a fictional aggregate P99.
+
+On Node 4 (MN4), with all other MuCQL suites stopped:
+
+~~~bash
+cd ~/rdmaLock && git pull --ff-only
+python3 tools/apt/run_parallel_instances.py --dry-run
+python3 tools/apt/run_parallel_instances.py
+~~~
+
+Default: **three repetitions of a single-leader round followed by a
+five-leader round**, with results at
+\`results/automation/<session>/aggregates.csv\` (aggregate/speedup inputs),
+\`runs.csv\` (all per-instance evidence, including timestamps and P99s), and
+per-node logs in separate instance folders. For a quick one-repetition
+smoke use \`--repetitions 1\`; use all three to judge a throughput ratio.
+All jobs are session-owned and cleaned up individually; another suite
+cannot run simultaneously due to the same runner lock.
+
+**Interpretation:** a >1× aggregate result supports the hypothesis
+that replicated ordering and coordinator CPU can scale using multiple
+logical leaders, *but does not measure genuine sharded-lock correctness*.
+A <1× result may mean RNIC/CPU/MR contention from multiple processes
+rather than an impossibility of sharding. The baseline is newly measured
+at ten workers and must not be compared directly to the older eight-worker
+one-key or 100K-key figures. Fixed logs still fail rather than recycle
+if a leader exhausts its registered accepted slots.
+
 ## CPU polling and early handoff connection experiment
 
 This is **MuCQL-only tuning**, not a DecLock benchmark or a demonstrated

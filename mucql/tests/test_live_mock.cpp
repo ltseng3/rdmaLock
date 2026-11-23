@@ -2,6 +2,7 @@
 #define MUCQL_LIVE_LIBRARY
 #include "../src/lock_live_main.cpp"
 #include <csignal>
+#include <cstdio>
 using namespace mucql_live;
 int main(int argc,char**argv){
   std::signal(SIGALRM,[](int){std::_Exit(22);});alarm(35);

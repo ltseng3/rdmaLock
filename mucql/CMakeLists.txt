@@ -188,4 +188,12 @@ set_tests_properties(mucql_live_hot_raw mucql_live_hot_optimized
       mucql_live_rdma_100k_zipf_mock
       PROPERTIES ENVIRONMENT "MUCQL_CN_TRANSPORT=rdma;MUCQL_HANDOFF_PRECONNECT=0"
                  TIMEOUT 45 RUN_SERIAL TRUE)
+
+  # The synchronized multi-instance GO gate is opt-in and leaves normal
+  # benchmark latency accounting unchanged when unset.
+  add_test(NAME mucql_live_rdma_synchronized_go_mock
+      COMMAND mucql_live_mock_test 4 16 1 1 1 2 0 1)
+  set_tests_properties(mucql_live_rdma_synchronized_go_mock
+      PROPERTIES ENVIRONMENT "MUCQL_CN_TRANSPORT=rdma;MUCQL_TEST_START_GATE=1"
+                 TIMEOUT 45 RUN_SERIAL TRUE)
 endif()

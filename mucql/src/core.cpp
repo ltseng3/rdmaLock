@@ -44,7 +44,7 @@ void Leader::replay(const Record& r) {
 }
 void Leader::recover() {
   std::lock_guard<std::mutex> g(mu_);
-  state_.clear();
+  state_.clear();staged_.clear();
   auto records=journal_.snapshot();
   uint64_t last_index=0;
   for (auto& r: records) {
@@ -54,6 +54,7 @@ void Leader::recover() {
 }
 Ticket Leader::join(LockId lock, ClientId client, RequestId request) {
   std::lock_guard<std::mutex> g(mu_);
+  if(staged_.count(lock))throw std::logic_error("unresolved mutation for JOIN key");
   auto& s=state_[lock];
   auto key=std::make_pair(client,request);
   auto it=s.requests.find(key);
@@ -69,6 +70,7 @@ Ticket Leader::join(LockId lock, ClientId client, RequestId request) {
 std::vector<Ticket> Leader::join_batch(LockId lock,
     const std::vector<std::pair<ClientId,RequestId>>& requests) {
   std::lock_guard<std::mutex> g(mu_);
+  if(staged_.count(lock))throw std::logic_error("unresolved mutation for JOIN key");
   if(requests.empty())return {};
   if(requests.size()>32)throw std::invalid_argument("join batch must be <=32");
   auto& s=state_[lock];
@@ -89,6 +91,11 @@ std::vector<Ticket> Leader::join_batch(LockId lock,
   return tickets;
 }
 std::vector<Ticket> Leader::join_many(const std::vector<JoinRequest>& requests) {
+  auto records=stage_join_many(requests);
+  if(records.empty())return {};
+  return apply_committed(journal_.commit_many(std::move(records)));
+}
+std::vector<Record> Leader::stage_join_many(const std::vector<JoinRequest>& requests) {
   std::lock_guard<std::mutex> g(mu_);
   if(requests.empty())return {};
   if(requests.size()>32)throw std::invalid_argument("cross-key JOIN batch must be <=32");
@@ -97,6 +104,7 @@ std::vector<Ticket> Leader::join_many(const std::vector<JoinRequest>& requests) 
   std::vector<Record> records;
   records.reserve(requests.size());
   for(const auto& req:requests){
+    if(staged_.count(req.lock))throw std::logic_error("unresolved mutation for JOIN key");
     if(!req.lock||!req.client||!req.request||
        state_[req.lock].requests.count({req.client,req.request})||
        !seen.insert({req.lock,req.client,req.request}).second)
@@ -106,20 +114,16 @@ std::vector<Ticket> Leader::join_many(const std::vector<JoinRequest>& requests) 
     r.first=state_[req.lock].queue.size()+queued[req.lock]++;
     records.push_back(r);
   }
-  // The journal posts the entire window to all followers before draining
-  // their completions. Failed batches expose NO tickets to the caller.
-  auto committed=journal_.commit_many(std::move(records));
-  for(const auto& r:committed)replay(r);
-  std::vector<Ticket> tickets;
-  tickets.reserve(committed.size());
-  for(const auto& r:committed)tickets.push_back(state_[r.lock].queue.at(r.first));
-  return tickets;
+  for(const auto& r:records)staged_.insert(r.lock);
+  return records;
 }
+
 bool Leader::add_overflows(uint64_t a,uint64_t b){
   return a>std::numeric_limits<uint64_t>::max()-b;
 }
 std::vector<Ticket> Leader::prepare(LockId lock, size_t max_count) {
   std::lock_guard<std::mutex> g(mu_);
+  if(staged_.count(lock))throw std::logic_error("unresolved mutation for PREPARE key");
   auto& s=state_[lock];
   if(!max_count || s.prepared>=s.queue.size())return {};
   size_t count=std::min({max_count,config_.prepare_batch,
@@ -151,6 +155,11 @@ std::vector<Ticket> Leader::prepare(LockId lock, size_t max_count) {
 }
 std::vector<Ticket> Leader::prepare_many(const std::vector<LockId>& locks,
                                               size_t max_count) {
+  auto records=stage_prepare_many(locks,max_count);
+  if(records.empty())return {};
+  return apply_committed(journal_.commit_many(std::move(records)));
+}
+std::vector<Record> Leader::stage_prepare_many(const std::vector<LockId>& locks,size_t max_count) {
   std::lock_guard<std::mutex> g(mu_);
   if(locks.empty()||max_count==0)return {};
   if(locks.size()>32)throw std::invalid_argument("cross-key PREPARE batch must be <=32");
@@ -158,6 +167,7 @@ std::vector<Ticket> Leader::prepare_many(const std::vector<LockId>& locks,
   std::vector<Record> records;
   records.reserve(locks.size());
   for(LockId lock:locks){
+    if(staged_.count(lock))throw std::logic_error("unresolved mutation for PREPARE key");
     if(!lock||!seen.insert(lock).second)
       throw std::invalid_argument("duplicate/invalid cross-key PREPARE lock");
     auto it=state_.find(lock);
@@ -185,16 +195,29 @@ std::vector<Ticket> Leader::prepare_many(const std::vector<LockId>& locks,
     r.first=s.prepared;r.last=s.prepared+count-1;r.deadline=deadline;
     records.push_back(r);
   }
-  if(records.empty())return {};
-  auto committed=journal_.commit_many(std::move(records));
-  for(const auto& r:committed)replay(r);
+  for(const auto& r:records)staged_.insert(r.lock);
+  return records;
+}
+bool Leader::can_stage(const std::vector<LockId>& locks) const {
+  std::lock_guard<std::mutex> g(mu_);
+  for(auto lock:locks)if(staged_.count(lock))return false;
+  return true;
+}
+std::vector<Ticket> Leader::apply_committed(const std::vector<Record>& records) {
+  std::lock_guard<std::mutex> g(mu_);
+  for(const auto& r:records)
+    if(!staged_.count(r.lock))throw std::logic_error("unstaged committed record");
+  for(const auto& r:records)replay(r);
   std::vector<Ticket> tickets;
-  for(const auto& r:committed){
+  for(const auto& r:records){
     const auto& q=state_[r.lock].queue;
-    for(Position pos=r.first;pos<=r.last;pos++)tickets.push_back(q.at(pos));
+    const auto last=r.type==Record::Type::Join?r.first:r.last;
+    for(Position pos=r.first;pos<=last;pos++)tickets.push_back(q.at(pos));
+    staged_.erase(r.lock);
   }
   return tickets;
 }
+
 std::optional<Ticket> Leader::ticket(LockId lock, Position pos) const {
   std::lock_guard<std::mutex> g(mu_);
   auto it=state_.find(lock);

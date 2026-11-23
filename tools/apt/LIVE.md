@@ -341,38 +341,57 @@ In the pipeline:
    actual JOIN requests **across different keys**. It submits them to a
    dedicated ordering thread without waiting for a quorum. The
    `batch_wait_us` setting is accounted for as CN admission latency.
-2. That thread assigns a single contiguous log index per record, issues
-   every RDMA WRITE+CAS pair in each bounded window on all three replica
-   QPs, and only then drains CQEs. No JOIN ticket becomes visible until a
-   majority has certified **every entry** in that batch.
-3. Committed JOIN completions trigger cross-key PREPARE tasks. Each lock
-   contributes at most one PREPARE record per window; tasks are FIFO
-   through the same ordering actor, so PREPARE cannot overtake its JOIN.
-   Every ticket and successor notification is sent **only after**
-   its PREPARE majority has completed. Hot locks can refill additional
-   prepared positions until the safe lookahead bound.
-4. Certified release observations are queued in the actor rather than
-   acquiring a mutex while the actor waits on RDMA CQEs. The receive loop
-   stays able to admit new requests and observe prior completions.
-5. On failed/indeterminate quorum, the whole run **fails closed**.
-   It does not expose partially accepted grants, reuse accepted-log
-   addresses, or silently truncate the timing window.
+2. The ordering thread reserves contiguous global log indices and posts
+   immutable RDMA WRITE+CAS pairs on all three replica QPs. It can post
+   additional independent batches while earlier batches are unresolved.
+   `phase2_window` limits each batch; the pipeline has **32 total record
+   credits** across outstanding batches. It polls CQEs without blocking and
+   matches each completion to its registered buffer by work-request ID.
+3. Each record needs a majority. Completed batches publish only as a
+   contiguous chosen log prefix, even if later batches finish first.
+   Publication does not wait for the third replica. A record's credit and
+   local buffers remain reserved until every replica completes or fails;
+   a slow replica can therefore eventually exert backpressure.
+4. A staged mutation reserves its key until publication. The scheduler can
+   skip blocked keys to submit independent work, preserving task order for
+   every shared key. PREPARE uses only committed JOINs, and only a committed
+   PREPARE produces activatable tickets and successor notifications.
+   Hot keys refill within the existing prepared-ahead bound.
+5. Certified release observations update committed state through the actor
+   while quorum work is outstanding. Neither the actor nor the CN receive
+   loop waits synchronously for Phase-2 completions.
+6. An impossible quorum fails the epoch closed. Reserved log indices and
+   uncertain accepted records are not reused; recovery requires a higher
+   ballot. Posting/CQ failures poison the affected QP. Its registered
+   buffers stay pinned until QP destruction, before deregistration.
 
-This is real bounded Phase-2 **cross-key batching with asynchronous
-coordinator/ordering overlap**. Each accepted window has up to 16 log
-entries in flight; the actor still drains a window before posting the
-next, and JOIN/PREPARE stages remain causally ordered. It is **not** yet
-an unrestricted sliding-window pipeline of many independently outstanding
-windows, and not a new set of shard leaders.
+This is a **bounded sliding pipeline of independently outstanding batches**
+on one leader, not a set of shard leaders. The local/TCP acceptor fallback
+still performs synchronous I/O at submission; nonblocking transport progress
+is provided by the RDMA adapter. Accepted-log addresses remain nonrecycling.
+Hardware fencing/takeover remains experimental as before.
 
-Each `LIVE_E2E` line and `runs.csv` reports:
-`multi_key_pipeline`, `cross_key_join_batches`,
-`cross_key_prepare_batches`, `phase2_windows_posted`,
-`phase2_multi_record_windows`, `phase2_max_window`,
-and `phase2_records_posted`. These count **actual records posted**
-rather than a configured credit depth. If `phase2_max_window=1`, the
-benchmark did not exercise genuine within-window pipelining, whatever
-the profile configuration says.
+Each `LIVE_E2E` line and `runs.csv` reports the existing batch counters plus:
+
+| Counter | Meaning |
+| --- | --- |
+| `phase2_max_inflight_batches` | Peak submitted batches retaining replica credits |
+| `phase2_max_inflight_records` | Peak submitted records retaining credits; at most 32 |
+| `phase2_overlap_submissions` | Batches posted while an earlier batch was unpublished |
+
+`phase2_max_window` and `phase2_multi_record_windows` still measure actual
+within-batch posting. To demonstrate overlap **between separate batches**,
+require `phase2_overlap_submissions > 0` and `phase2_max_inflight_batches > 1`.
+A configured window alone proves neither. Peak inflight counts can include
+already-published records waiting for a slow replica, so report the overlap
+counter alongside them. A workload that supplies only one batch at a time
+may legitimately report zero overlap.
+
+Deterministic tests hold back quorum responses, complete later batches first,
+exhaust/reclaim credits, and fail per-record quorums. The mock RNIC defers
+Phase-2 DMA until polling, exercising buffer lifetime and reuse; delayed
+uniform-key and single-hot-key runs also verify completed protected writes,
+release markers, and owner probes. These checks do not measure hardware gains.
 
 ### Nine-case single-leader hardware comparison
 
@@ -404,7 +423,8 @@ At 131072 accepted slots and max_ops=90000, a fast single-leader run
 could otherwise hit the cap and fail before the interval ends.
 The three profiles must be compared to **one another within this suite**,
 not directly to the historical 1-second throughput samples. Inspect
-actual `phase2_max_window`, the count of multi-record windows, P50/P99
+actual `phase2_max_window`, `phase2_overlap_submissions`, peak inflight
+batches/records, the count of multi-record windows, P50/P99
 admission and end-to-end latency, and release violations before claiming
 a speedup. CI mock RNIC tests do not establish CloudLab hardware gains.
 

@@ -41,7 +41,7 @@ of making synthetic claims. [Live test scope and limitations](tools/apt/LIVE.md)
 
 ## Dedicated CN nodes and batched ordering
 
-The Apt launcher accepts a JSON topology with separate replica, memory, and client nodes, and can start multiple independent worker processes on each CN. The ordering fast path supports up to 32 in-flight contiguous log entries per replica. [Dashboard commands](tools/apt/ISOLATED.md). The older `mucql_lock_e2e` test remains finite-batch; `mucql_lock_live` is the separate continuous workload.
+The Apt launcher accepts a JSON topology with separate replica, memory, and client nodes, and can start multiple independent worker processes on each CN. The ordering fast path supports up to 32 in-flight contiguous log entries per replica. The opt-in multi-key live path submits independent Phase-2 batches without draining earlier batches, polls completions without blocking, and publishes only a quorum-decided log prefix. [Pipeline scope and overlap counters](tools/apt/LIVE.md#asynchronous-cross-key-mu-phase-2-pipeline-opt-in). [Dashboard commands](tools/apt/ISOLATED.md). The older `mucql_lock_e2e` test remains finite-batch; `mucql_lock_live` is the separate continuous workload.
 
 ## End-to-end exclusive locking
 

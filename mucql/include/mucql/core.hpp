@@ -7,6 +7,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -105,6 +106,13 @@ class Leader {
   // Only committed prepared tickets are returned, in input-lock order.
   std::vector<Ticket> prepare_many(const std::vector<LockId>& locks,
                                    size_t max_count);
+  // Ordering-actor API: stage immutable proposals without publishing state,
+  // then apply ONLY records returned by the journal's quorum completion.
+  // One unresolved mutation per key; unrelated keys may be staged together.
+  bool can_stage(const std::vector<LockId>& locks) const;
+  std::vector<Record> stage_join_many(const std::vector<JoinRequest>& requests);
+  std::vector<Record> stage_prepare_many(const std::vector<LockId>& locks,size_t max_count);
+  std::vector<Ticket> apply_committed(const std::vector<Record>& records);
   std::optional<Ticket> ticket(LockId lock, Position position) const;
   std::vector<Ticket> ordered(LockId lock) const;
   // Observe a release slot. A positive value can justify early activation
@@ -131,6 +139,7 @@ class Leader {
   Config config_;
   mutable std::mutex mu_;
   std::unordered_map<LockId, State> state_;
+  std::set<LockId> staged_;
 };
 
 // On client restart all positions are WAITING and old ClientId cannot be used.

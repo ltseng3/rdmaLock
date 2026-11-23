@@ -68,6 +68,12 @@ class PaxosJournal final: public Journal {
   // caller receives NO acknowledgements and must recover at a higher ballot.
   std::vector<Record> commit_batch(std::vector<Record> proposals);
   void set_phase2_window(size_t n);
+  struct Phase2Stats {
+    size_t windows{},multi_record_windows{},records{},max_window{};
+  };
+  // Counts *actually submitted* phase-2 log windows, not configured
+  // settings. A successful multi-key experiment must show max_window >1.
+  Phase2Stats phase2_stats() const;
   size_t decided_count() const;
   std::vector<Record> commit_many(std::vector<Record> proposals) override {
     return commit_batch(std::move(proposals));
@@ -81,6 +87,7 @@ class PaxosJournal final: public Journal {
   uint64_t ballot_;
   mutable std::mutex mu_;
   bool leader_{false};
+  Phase2Stats phase2_stats_{};
   std::vector<Record> decided_;
 };
 }

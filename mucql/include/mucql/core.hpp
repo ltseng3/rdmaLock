@@ -38,6 +38,9 @@ struct Ticket {
   // 0: unprepared; a ticket may never be activated unless prepared.
   Deadline deadline{};
 };
+struct JoinRequest { LockId lock{}; ClientId client{}; RequestId request{}; };
+// Identifies an actual CN admission; records in a cross-lock batch retain
+// their original per-key FIFO order and their global Paxos log order.
 struct ReleaseMark { LockId lock{}; Position position{}; GrantId grant_id{}; };
 struct Handoff { Ticket successor; GrantId predecessor_id{}; Position predecessor{}; };
 
@@ -91,8 +94,17 @@ class Leader {
   // must be handled by join(); this method rejects duplicates explicitly.
   std::vector<Ticket> join_batch(LockId lock,
       const std::vector<std::pair<ClientId,RequestId>>& requests);
+  // Commit up to 32 real JOINs for potentially different locks in a single
+  // contiguous Paxos Phase-2 batch. Preserve the input order and never expose
+  // a ticket unless every record in the batch is quorum-decided.
+  std::vector<Ticket> join_many(const std::vector<JoinRequest>& requests);
   // Returns tickets *newly* prepared with the same chosen deadline.
   std::vector<Ticket> prepare(LockId lock, size_t max_count);
+  // One PREPARE record per distinct lock, submitted to a single Phase-2
+  // batch. Locks with no currently eligible positions contribute no record.
+  // Only committed prepared tickets are returned, in input-lock order.
+  std::vector<Ticket> prepare_many(const std::vector<LockId>& locks,
+                                   size_t max_count);
   std::optional<Ticket> ticket(LockId lock, Position position) const;
   std::vector<Ticket> ordered(LockId lock) const;
   // Observe a release slot. A positive value can justify early activation

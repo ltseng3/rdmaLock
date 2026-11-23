@@ -195,6 +195,7 @@ int coordinator(int argc,char**argv){
   const auto rx_idle_us=env_number("MUCQL_RX_IDLE_US",0,100);
   const auto handoff_idle_us=env_number("MUCQL_HANDOFF_IDLE_US",0,100);
   const auto handoff_preconnect=env_number("MUCQL_HANDOFF_PRECONNECT",1,1);
+  const bool multi_key_pipeline=env_number("MUCQL_MULTI_KEY_PIPELINE",0,1)!=0;
   int listenfd=listen_tcp(port);
   std::cout<<"LIVE coordinator listening tcp="<<port<<" workers="<<o.workers
            <<" locks="<<o.lock_count<<" max_ops="<<o.max_ops<<" transport="<<(control_rdma?"rdma":"tcp")<<std::endl;
@@ -278,7 +279,83 @@ int coordinator(int argc,char**argv){
   uint64_t joined=0,done=0,measured=0,prepare_records=0;
   uint64_t actual_join_batches=0,join_batch_sum=0;
   uint64_t join_key_visits=0,prepare_key_visits=0;
+  uint64_t cross_key_join_batches=0,cross_key_prepare_batches=0;
   std::vector<uint64_t> latency,admission,waits;
+  // The ordering thread posts up to phase2_window independent log entries
+  // before waiting for quorum CQEs. The event loop remains free to receive
+  // more CN requests and certified completions while Phase-2 is in flight.
+  struct PipeTask {
+    bool prepare{},observe{};
+    ReleaseMark marker{};
+    std::vector<JoinRequest> joins;
+    std::vector<LockId> locks;
+  };
+  struct PipeResult {
+    bool prepare{},observe{};
+    std::vector<Ticket> tickets;
+    size_t submitted_joins{};
+    std::exception_ptr error;
+  };
+  std::mutex task_mu;
+  std::condition_variable task_cv;
+  std::deque<PipeTask> tasks;
+  std::deque<PipeResult> finished_tasks; // protected by existing mu
+  bool task_stop=false;
+  size_t pending_tasks=0,pending_joins=0;
+  std::thread ordering_thread;
+  if(multi_key_pipeline){
+    ordering_thread=std::thread([&]{
+      for(;;){
+        PipeTask task;
+        {
+          std::unique_lock<std::mutex> lock(task_mu);
+          task_cv.wait(lock,[&]{return task_stop||!tasks.empty();});
+          if(task_stop)return;
+          task=std::move(tasks.front());tasks.pop_front();
+        }
+        PipeResult result;result.prepare=task.prepare;
+        result.observe=task.observe;
+        result.submitted_joins=task.joins.size();
+        try{
+          if(task.observe){
+            leader.observe(task.marker);
+          }else if(task.prepare){
+            // The existing non-recycling log never accepts work at its cap.
+            if(journal.decided_count()+task.locks.size()>=o.paxos_slots)
+              fail("journal full before pipelined PREPARE");
+            result.tickets=leader.prepare_many(task.locks,o.prepare_range);
+          }else{
+            if(!join_log_has_room(journal.decided_count(),task.joins.size(),
+                                  o.paxos_slots))
+              fail("nonrecycling journal exhausted before pipelined JOIN");
+            result.tickets=leader.join_many(task.joins);
+          }
+        }catch(...){result.error=std::current_exception();}
+        const bool failed=bool(result.error);
+        {
+          std::lock_guard<std::mutex> lock(mu);
+          finished_tasks.push_back(std::move(result));
+        }
+        cv.notify_one();
+        if(failed)return; // the coordinator fails; no speculative retries
+      }
+    });
+  }
+  auto queue_task=[&](PipeTask task){
+    if(!multi_key_pipeline)fail("asynchronous task without pipelining");
+    if(pending_tasks>=o.workers*8+32)fail("asynchronous task queue overflow");
+    pending_tasks++;
+    pending_joins+=task.joins.size();
+    {std::lock_guard<std::mutex> lock(task_mu);tasks.push_back(std::move(task));}
+    task_cv.notify_one();
+  };
+  auto stop_ordering=[&]{
+    if(ordering_thread.joinable()){
+      {std::lock_guard<std::mutex> lock(task_mu);task_stop=true;tasks.clear();}
+      task_cv.notify_all();
+      ordering_thread.join();
+    }
+  };
   // Keep all historical tickets for end-of-run verification, but only visit
   // keys with newly committed JOINs or newly certified completions in the
   // critical-path scheduling loop. Scanning every key ever seen made a
@@ -295,11 +372,64 @@ int coordinator(int argc,char**argv){
       if(!stopped&&ClockType::now()>=end){
         stopped=true;for(size_t w=0;w<o.workers;w++)send_to(w,message(Stop));}
       std::deque<Event> events;
+      std::deque<PipeResult> committed;
       {std::unique_lock<std::mutex> lock(mu);
-        if(received.empty()&&recv_error.empty()&&!(stopped&&quiescent_count==o.workers))
+        if(received.empty()&&finished_tasks.empty()&&recv_error.empty()&&
+           !(stopped&&quiescent_count==o.workers))
           cv.wait_for(lock,std::chrono::milliseconds(1));
         if(!recv_error.empty())fail(recv_error);
         events.swap(received);
+        committed.swap(finished_tasks);
+      }
+      // Deliver nothing before a majority decision. These results are
+      // produced by the ordering thread AFTER finishing every CQE of its
+      // bounded batch, in the same order as their journal indices.
+      for(auto& result:committed){
+        if(!pending_tasks)fail("orphan asynchronous quorum completion");
+        pending_tasks--;
+        if(result.error)std::rethrow_exception(result.error);
+        if(result.observe){
+          // Certified releases are serialized through the same actor as
+          // JOIN and PREPARE, so the coordinator never waits on a Leader
+          // mutex held by an in-flight Phase-2 quorum operation.
+          continue;
+        }
+        if(result.prepare){
+          std::map<LockId,Position> last_prepared;
+          for(const auto& t:result.tickets)
+            last_prepared[t.lock]=std::max(last_prepared[t.lock],t.position+1);
+          prepare_records+=last_prepared.size();
+          if(last_prepared.size()>1)cross_key_prepare_batches++;
+          for(const auto& t:result.tickets){
+            granted[t.grant_id]=t;
+            send_to(t.client-1,message(TicketReady,t));
+            if(t.position>0){
+              const auto pred=leader.ticket(t.lock,t.position-1);
+              if(!pred||!pred->deadline||pred->grant_id!=t.predecessor_id)
+                fail("pipelined prepared successor without prepared predecessor");
+              send_to(pred->client-1,message(HandoffReady,t));
+            }
+          }
+          // With prepare_range=1 a hot key may need several PREPARE
+          // records to fill its lookahead. Re-arm only locks that actually
+          // prepared a position and have more committed JOIN tickets.
+          // A full lookahead produces an empty next result and stops.
+          for(const auto& [lock,prepared]:last_prepared)
+            if(known[lock].size()>prepared)prepare_ready.insert(lock);
+        }else{
+          if(result.tickets.size()!=result.submitted_joins||
+             pending_joins<result.tickets.size())
+            fail("cross-key JOIN completion mismatch");
+          pending_joins-=result.tickets.size();
+          std::set<LockId> locks;
+          for(const auto& t:result.tickets){
+            known[t.lock].push_back(t);joined++;
+            locks.insert(t.lock);
+          }
+          if(locks.size()>1)cross_key_join_batches++;
+          actual_join_batches++;join_batch_sum+=result.tickets.size();
+          prepare_ready.insert(locks.begin(),locks.end());
+        }
       }
       for(const auto& e:events){
         const auto& m=e.m;
@@ -318,7 +448,13 @@ int coordinator(int argc,char**argv){
               " got="+(it==granted.end()?"missing":std::to_string(it->second.client))+
               " position="+std::to_string(m.ticket.position)+" oldpos="+(it==granted.end()?"missing":std::to_string(it->second.position))+" oldlock="+(it==granted.end()?"missing":std::to_string(it->second.lock))+" completions="+std::to_string(completed.count(m.ticket.grant)));
           if(release.read_slot(m.ticket.grant)!=m.ticket.grant)fail("uncertified release marker");
-          leader.observe({it->second.lock,it->second.position,it->second.grant_id});
+          if(multi_key_pipeline){
+            PipeTask observed;observed.observe=true;
+            observed.marker={it->second.lock,it->second.position,it->second.grant_id};
+            queue_task(std::move(observed));
+          }else{
+            leader.observe({it->second.lock,it->second.position,it->second.grant_id});
+          }
           // A completed predecessor may free a PREPARE lookahead window.
           // The benchmark clock never advances, so release notification
           // (or a new JOIN) is the only reason to revisit this lock.
@@ -354,46 +490,78 @@ int coordinator(int argc,char**argv){
           }
         }
       }
-      // Iterate just the keys that actually received JOINs. Process in
-      // ascending lock order as before; erase drained queues immediately.
-      for(LockId lock:join_ready){
-        auto pending=waiting.find(lock);
-        if(pending==waiting.end()||pending->second.empty())
-          fail("JOIN worklist key has no pending requests");
-        auto& queue=pending->second;
-        ++join_key_visits;
-        while(!queue.empty()){
-          const size_t cap=std::min<size_t>(o.join_aggregate,queue.size());
-          if(!join_log_has_room(journal.decided_count(),cap,o.paxos_slots) || joined+cap>o.max_ops)
-            fail("nonrecycling journal/operation cap exhausted BEFORE timed interval completed");
-          std::vector<std::pair<ClientId,RequestId>> reqs;
-          for(size_t i=0;i<cap;i++){
-            const auto e=queue.front();queue.pop_front();reqs.emplace_back(e.worker+1,e.m.ticket.request);
+      // Gather REAL CN requests from different lock IDs into a bounded
+      // window. The background ordering thread posts every phase-2 entry
+      // before polling and returns only quorum-chosen tickets.
+      if(multi_key_pipeline){
+        PipeTask batch;
+        for(LockId lock:join_ready){
+          auto pending=waiting.find(lock);
+          if(pending==waiting.end()||pending->second.empty())
+            fail("JOIN worklist key has no pending requests");
+          ++join_key_visits;
+          for(const auto& e:pending->second){
+            if(joined+pending_joins+batch.joins.size()+1>o.max_ops)
+              fail("nonrecycling operation budget exhausted in JOIN pipeline");
+            batch.joins.push_back({lock,e.worker+1,e.m.ticket.request});
+            if(batch.joins.size()==std::min(o.join_aggregate,o.phase2_window)){
+              queue_task(std::move(batch));batch=PipeTask{};
+            }
           }
-          auto new_tickets=leader.join_batch(lock,reqs);
-          if(new_tickets.size()!=cap)fail("JOIN batch mismatch");
-          for(auto& t:new_tickets){known[lock].push_back(t);joined++;}
-          actual_join_batches++;join_batch_sum+=cap;
+          waiting.erase(pending);
         }
-        waiting.erase(pending);
-        prepare_ready.insert(lock);
+        if(!batch.joins.empty())queue_task(std::move(batch));
+      }else{
+        // Legacy baseline: synchronous, single-key commits, unchanged.
+        for(LockId lock:join_ready){
+          auto pending=waiting.find(lock);
+          if(pending==waiting.end()||pending->second.empty())
+            fail("JOIN worklist key has no pending requests");
+          auto& queue=pending->second;
+          ++join_key_visits;
+          while(!queue.empty()){
+            const size_t cap=std::min<size_t>(o.join_aggregate,queue.size());
+            if(!join_log_has_room(journal.decided_count(),cap,o.paxos_slots) || joined+cap>o.max_ops)
+              fail("nonrecycling journal/operation cap exhausted BEFORE timed interval completed");
+            std::vector<std::pair<ClientId,RequestId>> reqs;
+            for(size_t i=0;i<cap;i++){
+              const auto e=queue.front();queue.pop_front();reqs.emplace_back(e.worker+1,e.m.ticket.request);
+            }
+            auto new_tickets=leader.join_batch(lock,reqs);
+            if(new_tickets.size()!=cap)fail("JOIN batch mismatch");
+            for(auto& t:new_tickets){known[lock].push_back(t);joined++;}
+            actual_join_batches++;join_batch_sum+=cap;
+          }
+          waiting.erase(pending);
+          prepare_ready.insert(lock);
+        }
       }
       join_ready.clear();
       // PREPARE must be committed BEFORE the owning CN or predecessor sees
       // the successor as activatable. The queue advances only on certified CAS.
+      PipeTask prepared_batch;prepared_batch.prepare=true;
       for(LockId lock:prepare_ready){
         auto candidate=known.find(lock);
         if(candidate==known.end()||candidate->second.empty())
           fail("PREPARE worklist key has no committed JOIN");
         auto& tickets=candidate->second;
         ++prepare_key_visits;
-        // A low-watermark trigger, with 1 = reactive and higher = proactive.
+        if(multi_key_pipeline){
+          // PREPARE eligibility and the prepared-ahead limit are evaluated
+          // by the ordering actor *after* preceding release observations.
+          // No Leader mutex is acquired on the receive loop.
+          prepared_batch.locks.push_back(lock);
+          if(prepared_batch.locks.size()==o.phase2_window){
+            queue_task(std::move(prepared_batch));
+            prepared_batch=PipeTask{};prepared_batch.prepare=true;
+          }
+          continue;
+        }
         auto initial_prepared=leader.prepared_count(lock);
         auto& progress=progress_frontier[lock];
         while(progress<tickets.size()&&completed.count(tickets[progress].grant_id))progress++;
         if(initial_prepared>=tickets.size()||initial_prepared-progress>o.replenish_threshold)continue;
-        // Once below the trigger, fill toward the configured prepared window.
-        // This separates window depth from *when* replenishment begins.
+        // Legacy synchronous PREPARE path: keep baseline unchanged.
         for(;;){
           if(leader.prepared_count(lock)>=tickets.size())break;
           if(journal.decided_count()+1>=o.paxos_slots)fail("journal full before PREPARE");
@@ -412,11 +580,15 @@ int coordinator(int argc,char**argv){
           }
         }
       }
+      if(multi_key_pipeline&&!prepared_batch.locks.empty())
+        queue_task(std::move(prepared_batch));
       // A full lookahead window can only reopen on a certified release;
       // Done re-arms the lock. Never carry idle keys into another pass.
       prepare_ready.clear();
-      if(stopped&&quiescent_count==o.workers&&done==joined)break;
+      if(stopped&&quiescent_count==o.workers&&done==joined&&
+         pending_tasks==0&&pending_joins==0&&waiting.empty())break;
     }
+    stop_ordering();
     // Out of stopwatch: independently verify every release, last protected
     // write per lock, and owner probe. No warmup request was precommitted.
     for(const auto& [grant,t]:granted){if(!completed.count(grant)||release.read_slot(grant)!=grant)
@@ -427,6 +599,7 @@ int coordinator(int argc,char**argv){
       if(o.probe&&release.read_slot(owner_slot(o,lock))!=0)fail("owner slot not cleared");
     }
     if(measured==0)fail("no measured completions");
+    const auto phase2=journal.phase2_stats();
     std::cout<<"LIVE_E2E status=PASS scope=live_steady_state workers="<<o.workers
       <<" locks="<<o.lock_count<<" zipf="<<o.zipf
       <<" read_ratio=0 data_size_bytes=8 data_ops="<<o.data_ops
@@ -439,6 +612,13 @@ int coordinator(int argc,char**argv){
       <<" replenish_threshold="<<o.replenish_threshold<<" batch_wait_us="<<o.batch_wait_us<<" join_batches="<<actual_join_batches
       <<" actual_join_batch_mean="<<(actual_join_batches?double(join_batch_sum)/actual_join_batches:0)
       <<" prepare_records="<<prepare_records
+      <<" multi_key_pipeline="<<(multi_key_pipeline?1:0)
+      <<" cross_key_join_batches="<<cross_key_join_batches
+      <<" cross_key_prepare_batches="<<cross_key_prepare_batches
+      <<" phase2_windows_posted="<<phase2.windows
+      <<" phase2_multi_record_windows="<<phase2.multi_record_windows
+      <<" phase2_max_window="<<phase2.max_window
+      <<" phase2_records_posted="<<phase2.records
       <<" join_key_visits="<<join_key_visits
       <<" prepare_key_visits="<<prepare_key_visits
       <<" distinct_keys_seen="<<known.size()
@@ -457,6 +637,7 @@ int coordinator(int argc,char**argv){
       <<" probe="<<o.probe<<" work_ns="<<o.work_ns<<std::endl;
     for(size_t w=0;w<o.workers;w++)send_to(w,message(Finish));
   }catch(...){
+    stop_ordering();
     {std::lock_guard<std::mutex> lock(mu);closed=true;}
     for(auto& ch:channels)if(ch)ch->stop();
     for(auto fd:sockets)shutdown(fd,SHUT_RDWR);

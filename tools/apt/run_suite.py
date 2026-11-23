@@ -48,6 +48,9 @@ COLUMNS = ['case', 'scenario', 'trial', 'kind', 'measurement_scope', 'comparable
            'paxos_slots', 'max_ops', 'join_aggregate', 'phase2_window', 'prepare_range',
            'lookahead', 'replenish_threshold', 'batch_wait_us', 'measured', 'join_batches',
            'actual_join_batch_mean', 'prepare_records',
+           'multi_key_pipeline','cross_key_join_batches','cross_key_prepare_batches',
+           'phase2_windows_posted','phase2_multi_record_windows','phase2_max_window',
+           'phase2_records_posted',
            'join_key_visits', 'prepare_key_visits', 'distinct_keys_seen',
            'latency_p50_ns', 'latency_p95_ns',
            'latency_p99_ns', 'admission_p50_ns', 'admission_p99_ns', 'handoff_wait_p99_ns', 'error']
@@ -260,6 +263,25 @@ def extract_live(text):
             int(result['prepare_key_visits'])>int(result['joins'])+int(result['completed']) or
             int(result['distinct_keys_seen'])>int(result['joins'])):
             raise ValueError('LIVE dirty-key accounting inconsistent')
+    phase2=('multi_key_pipeline','cross_key_join_batches',
+            'cross_key_prepare_batches','phase2_windows_posted',
+            'phase2_multi_record_windows','phase2_max_window',
+            'phase2_records_posted')
+    if any(k in result for k in phase2):
+        if (not all(k in result for k in phase2) or
+            any(not result[k].isdigit() for k in phase2) or
+            int(result['multi_key_pipeline']) not in (0,1) or
+            int(result['phase2_multi_record_windows'])>
+                int(result['phase2_windows_posted']) or
+            int(result['phase2_max_window'])>32 or
+            int(result['phase2_records_posted'])<
+                int(result['phase2_windows_posted']) or
+            (int(result['phase2_multi_record_windows'])>0 and
+             int(result['phase2_max_window'])<2) or
+            (int(result['multi_key_pipeline'])==0 and
+             (int(result['cross_key_join_batches']) or
+              int(result['cross_key_prepare_batches']))):
+            raise ValueError('invalid asynchronous phase-2 diagnostics')
     for key in ('goodput_ops_per_sec','actual_join_batch_mean'):
         if not math.isfinite(float(result[key])) or float(result[key])<=0:
             raise ValueError('invalid LIVE metric '+key)
@@ -436,6 +458,9 @@ def benchmark(ex, case, topology, commit, session, run_root, ballot, timeout):
             for k in ('join_aggregate','phase2_window','prepare_range','lookahead','replenish_threshold','batch_wait_us'):
                 if int(summary[k]) != doc['benchmark'][k]:
                     raise ValueError('LIVE reported knob differs: '+k)
+            if 'multi_key_pipeline' in summary:
+                if int(summary['multi_key_pipeline'])!=doc['benchmark'].get('multi_key_pipeline',0):
+                    raise ValueError('LIVE reported cross-key pipeline mode differs')
         elif int(summary['committed']) != case['positions'] or int(summary['batch']) != case['batch']:
             raise ValueError('ordering result does not match requested case')
         row = {key: '' for key in COLUMNS}
@@ -460,7 +485,10 @@ def benchmark(ex, case, topology, commit, session, run_root, ballot, timeout):
                       'handoff_wait_p99_ns','goodput_ops_per_sec','completed','verified_markers','violations',
                        'data_writes_measured'):
                 row[k]=summary[k]
-            for k in ('join_key_visits','prepare_key_visits','distinct_keys_seen','go_epoch_ns'):
+            for k in ('join_key_visits','prepare_key_visits','distinct_keys_seen','go_epoch_ns',
+                      'multi_key_pipeline','cross_key_join_batches','cross_key_prepare_batches',
+                      'phase2_windows_posted','phase2_multi_record_windows',
+                      'phase2_max_window','phase2_records_posted'):
                 row[k]=summary.get(k,'')
         elif case['kind'] == 'prepared_e2e':
             for f in ('completed', 'verified_markers', 'violations', 'ordering_seconds',

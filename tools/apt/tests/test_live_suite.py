@@ -39,7 +39,8 @@ class LiveSuiteTests(unittest.TestCase):
             p=profile(name)
             self.assertLessEqual(p['prepare_range'],p['lookahead'])
             self.assertLessEqual(p['replenish_threshold'],p['lookahead'])
-        expected={'JOIN aggregation (raw context)':{'join_aggregate'},
+        expected={'Async cross-key Phase-2 pipelining':{'multi_key_pipeline'},
+                  'JOIN aggregation (raw context)':{'join_aggregate'},
                   'RDMA phase2 pipelining':{'phase2_window'},
                   'PREPARE range compression':{'prepare_range'},
                   'Prepared window depth':{'lookahead'},
@@ -262,6 +263,51 @@ class LiveSuiteTests(unittest.TestCase):
             with self.subTest(invalid=invalid[-105:]):
                 with self.assertRaisesRegex(ValueError,'dirty-key accounting'):
                     runner.extract_live(invalid)
+
+    def test_cross_key_pipeline_focused_comparison(self):
+        spec=json.loads((HERE/'suites/live_multi_key_async_focus.json').read_text())
+        cases=runner.expand_suite(spec,TOPO)
+        self.assertEqual(len(cases),9)  # 3 profiles x 3 hardware repeats
+        self.assertEqual({c['profile'] for c in cases},
+                         {'raw','multi_key_control','multi_key_async'})
+        self.assertEqual({c['locks'] for c in cases},{100000})
+        self.assertEqual({c['workers_per_cn'] for c in cases},{8})
+        self.assertEqual({c['transport'] for c in cases},{'rdma'})
+        self.assertEqual({c['distribution'] for c in cases},{'uniform'})
+        self.assertEqual({c['measure_ms'] for c in cases},{1000})
+        for c in cases:
+            cfg=runner.case_topology(TOPO,c,4101)
+            self.assertEqual(cluster.validate(cfg),16)
+            self.assertEqual(cfg['benchmark']['multi_key_pipeline'],
+                             int(c['profile']=='multi_key_async'))
+            self.assertEqual(cfg['benchmark']['phase2_window'],
+                             1 if c['profile']=='raw' else 16)
+            self.assertEqual(cfg['benchmark']['join_aggregate'],
+                             1 if c['profile']=='raw' else 16)
+            self.assertEqual(cfg['benchmark']['prepare_range'],1)
+            self.assertEqual(cfg['benchmark']['lookahead'],2)
+
+    def test_async_phase2_output_proves_actual_cross_key_windows(self):
+        suffix=(' multi_key_pipeline=1 cross_key_join_batches=4'
+                ' cross_key_prepare_batches=3 phase2_windows_posted=12'
+                ' phase2_multi_record_windows=7 phase2_max_window=16'
+                ' phase2_records_posted=64')
+        parsed=runner.extract_live(LIVE_LINE+suffix)
+        self.assertEqual(parsed['phase2_max_window'],'16')
+        self.assertEqual(parsed['cross_key_join_batches'],'4')
+        # Earlier output without phase-2 counters remains readable.
+        self.assertNotIn('multi_key_pipeline',runner.extract_live(LIVE_LINE))
+        for invalid in (
+            suffix.replace('phase2_max_window=16','phase2_max_window=33'),
+            suffix.replace('phase2_multi_record_windows=7',
+                           'phase2_multi_record_windows=13'),
+            suffix.replace('multi_key_pipeline=1','multi_key_pipeline=2'),
+            suffix.replace('phase2_records_posted=64','phase2_records_posted=1'),
+            suffix.replace('phase2_max_window=16',''),
+        ):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError,'asynchronous phase-2'):
+                    runner.extract_live(LIVE_LINE+invalid)
 
     def test_lock_count_sweep_varies_only_keyspace_and_distribution(self):
         suites=[

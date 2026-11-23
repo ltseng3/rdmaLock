@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <limits>
 #include <set>
+#include <tuple>
 
 namespace mucql {
 Record MemoryJournal::commit(Record r) {
@@ -87,6 +88,33 @@ std::vector<Ticket> Leader::join_batch(LockId lock,
     tickets.push_back(s.queue[i]);
   return tickets;
 }
+std::vector<Ticket> Leader::join_many(const std::vector<JoinRequest>& requests) {
+  std::lock_guard<std::mutex> g(mu_);
+  if(requests.empty())return {};
+  if(requests.size()>32)throw std::invalid_argument("cross-key JOIN batch must be <=32");
+  std::set<std::tuple<LockId,ClientId,RequestId>> seen;
+  std::unordered_map<LockId,size_t> queued;
+  std::vector<Record> records;
+  records.reserve(requests.size());
+  for(const auto& req:requests){
+    if(!req.lock||!req.client||!req.request||
+       state_[req.lock].requests.count({req.client,req.request})||
+       !seen.insert({req.lock,req.client,req.request}).second)
+      throw std::invalid_argument("duplicate/invalid cross-key JOIN");
+    Record r{};r.type=Record::Type::Join;r.lock=req.lock;
+    r.client=req.client;r.request=req.request;
+    r.first=state_[req.lock].queue.size()+queued[req.lock]++;
+    records.push_back(r);
+  }
+  // The journal posts the entire window to all followers before draining
+  // their completions. Failed batches expose NO tickets to the caller.
+  auto committed=journal_.commit_many(std::move(records));
+  for(const auto& r:committed)replay(r);
+  std::vector<Ticket> tickets;
+  tickets.reserve(committed.size());
+  for(const auto& r:committed)tickets.push_back(state_[r.lock].queue.at(r.first));
+  return tickets;
+}
 bool Leader::add_overflows(uint64_t a,uint64_t b){
   return a>std::numeric_limits<uint64_t>::max()-b;
 }
@@ -120,6 +148,52 @@ std::vector<Ticket> Leader::prepare(LockId lock, size_t max_count) {
   replay(r);
   auto& q=state_[lock].queue;
   return std::vector<Ticket>(q.begin()+r.first,q.begin()+r.last+1);
+}
+std::vector<Ticket> Leader::prepare_many(const std::vector<LockId>& locks,
+                                              size_t max_count) {
+  std::lock_guard<std::mutex> g(mu_);
+  if(locks.empty()||max_count==0)return {};
+  if(locks.size()>32)throw std::invalid_argument("cross-key PREPARE batch must be <=32");
+  std::set<LockId> seen;
+  std::vector<Record> records;
+  records.reserve(locks.size());
+  for(LockId lock:locks){
+    if(!lock||!seen.insert(lock).second)
+      throw std::invalid_argument("duplicate/invalid cross-key PREPARE lock");
+    auto it=state_.find(lock);
+    if(it==state_.end())continue;
+    auto& s=it->second;
+    if(s.prepared>=s.queue.size())continue;
+    size_t count=std::min({max_count,config_.prepare_batch,
+                           s.queue.size()-s.prepared});
+    Position progress=s.progress;
+    const auto now=clock_.now();
+    if(now.lower>now.upper)throw std::logic_error("invalid clock bounds");
+    while(progress<s.prepared &&
+          (s.released.count(progress) ||
+           now.lower>=s.queue[progress].deadline))++progress;
+    s.progress=progress;
+    if(s.prepared-progress>=config_.prepared_ahead)continue;
+    count=std::min(count,config_.prepared_ahead-(s.prepared-progress));
+    if(!count)continue;
+    const auto b=clock_.now();
+    if(b.lower>b.upper||add_overflows(b.upper,config_.horizon_ns))
+      throw std::logic_error("clock bounds invalid/overflow");
+    Deadline deadline=b.upper+config_.horizon_ns;
+    if(s.prepared)deadline=std::max(deadline,s.queue[s.prepared-1].deadline);
+    Record r{};r.type=Record::Type::Prepare;r.lock=lock;
+    r.first=s.prepared;r.last=s.prepared+count-1;r.deadline=deadline;
+    records.push_back(r);
+  }
+  if(records.empty())return {};
+  auto committed=journal_.commit_many(std::move(records));
+  for(const auto& r:committed)replay(r);
+  std::vector<Ticket> tickets;
+  for(const auto& r:committed){
+    const auto& q=state_[r.lock].queue;
+    for(Position pos=r.first;pos<=r.last;pos++)tickets.push_back(q.at(pos));
+  }
+  return tickets;
 }
 std::optional<Ticket> Leader::ticket(LockId lock, Position pos) const {
   std::lock_guard<std::mutex> g(mu_);

@@ -43,6 +43,7 @@ PROFILES = {
 # Each pair changes one mechanism; a pair with identical settings is excluded.
 # The effect of an optimization depends on what other optimizations are on.
 ABLATIONS = [
+    ('Async cross-key Phase-2 pipelining', 'multi_key_control', 'multi_key_async'),
     ('JOIN aggregation (raw context)', 'join_control', 'join_aggregation'),
     ('RDMA phase2 pipelining', 'phase2_control', 'phase2_pipelined'),
     ('PREPARE range compression', 'prepare_control', 'prepare_compressed'),

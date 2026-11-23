@@ -127,6 +127,10 @@ std::vector<Record> PaxosJournal::commit_batch(std::vector<Record> proposals) {
   for(size_t off=0;off<proposals.size();off+=phase2_window_){
     auto stop=std::min(proposals.size(),off+phase2_window_);
     std::vector<Record> window(proposals.begin()+off,proposals.begin()+stop);
+    ++phase2_stats_.windows;
+    phase2_stats_.records+=window.size();
+    if(window.size()>1)++phase2_stats_.multi_record_windows;
+    phase2_stats_.max_window=std::max(phase2_stats_.max_window,window.size());
     if(!accept_batch_to_majority(window)){
       leader_=false;
       throw std::runtime_error("phase 2 window quorum failed; recover before retry");
@@ -138,6 +142,9 @@ std::vector<Record> PaxosJournal::commit_batch(std::vector<Record> proposals) {
 void PaxosJournal::set_phase2_window(size_t n){
   if(n<1||n>32)throw std::invalid_argument("phase2 window must be 1..32");
   std::lock_guard<std::mutex> l(mu_);phase2_window_=n;
+}
+PaxosJournal::Phase2Stats PaxosJournal::phase2_stats() const {
+  std::lock_guard<std::mutex> l(mu_);return phase2_stats_;
 }
 size_t PaxosJournal::decided_count() const {
   std::lock_guard<std::mutex> l(mu_);return decided_.size();

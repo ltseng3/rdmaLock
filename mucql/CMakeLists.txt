@@ -21,6 +21,11 @@ target_link_libraries(mucql_batch_test PRIVATE mucql_core Threads::Threads)
 target_compile_options(mucql_batch_test PRIVATE -UNDEBUG)
 add_test(NAME mucql_batch_recovery COMMAND mucql_batch_test)
 
+add_executable(mucql_multi_key_pipeline_test tests/test_multi_key_pipeline.cpp)
+target_link_libraries(mucql_multi_key_pipeline_test PRIVATE mucql_core Threads::Threads)
+target_compile_options(mucql_multi_key_pipeline_test PRIVATE -UNDEBUG -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME mucql_multi_key_phase2_quorum COMMAND mucql_multi_key_pipeline_test)
+
 
 add_executable(mucql_online_core_test tests/test_online_core.cpp)
 target_link_libraries(mucql_online_core_test PRIVATE mucql_core Threads::Threads)
@@ -187,6 +192,15 @@ set_tests_properties(mucql_live_hot_raw mucql_live_hot_optimized
   set_tests_properties(mucql_live_rdma_100k_uniform_mock
       mucql_live_rdma_100k_zipf_mock
       PROPERTIES ENVIRONMENT "MUCQL_CN_TRANSPORT=rdma;MUCQL_HANDOFF_PRECONNECT=0"
+                 TIMEOUT 45 RUN_SERIAL TRUE)
+
+  # Real cross-lock Phase-2 pipelining: the coordinator keeps accepting
+  # events during quorum CQ draining; ticket activation still requires a
+  # majority-decided JOIN followed by a majority-decided PREPARE.
+  add_test(NAME mucql_live_rdma_multikey_async_mock
+      COMMAND mucql_live_mock_test 16 100000 16 16 1 2 0 1)
+  set_tests_properties(mucql_live_rdma_multikey_async_mock
+      PROPERTIES ENVIRONMENT "MUCQL_CN_TRANSPORT=rdma;MUCQL_MULTI_KEY_PIPELINE=1;MUCQL_HANDOFF_PRECONNECT=0"
                  TIMEOUT 45 RUN_SERIAL TRUE)
 
   # The synchronized multi-instance GO gate is opt-in and leaves normal

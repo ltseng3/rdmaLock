@@ -278,6 +278,55 @@ though the new implementation defaults to early connection. Later,
 select a representative high-contention and low-contention key count
 for focused A/B optimization tests.
 
+## Dirty-key coordinator scheduling: two-point diagnostic (six cases)
+
+The first 8-worker key sweep found 29909 completed ops/s on 16 uniform
+keys but only 5808 ops/s on 100000 uniform keys (3-trial medians,
+1-second measurements). Zipf was faster than uniform at high key counts,
+suggesting the old coordinator's O(distinct_keys_seen) scanning overhead.
+
+The coordinator formerly retained every key in both `waiting` and `known`
+and iterated both maps every time it handled network events, including
+when almost all keys were idle. The revised coordinator:
+
+* Adds a lock to the JOIN worklist when a CN sends a JOIN. It processes
+  those locks in the same ascending-key order, then erases emptied queues.
+* Adds a lock to the PREPARE worklist only when committed JOINs enlarge
+  its queue or a validated completion releases progress. It visits
+  only these locks and clears the worklist after processing the batch.
+* Continues to retain historical tickets, unique grant IDs, and completed
+  release markers for end-of-run verification. It does **not** change
+  Paxos quorum ordering, PREPARE-before-activation, or RNIC CAS handoff.
+* Emits `join_key_visits`, `prepare_key_visits` and
+  `distinct_keys_seen` in the LIVE_E2E line and runs.csv.
+  The runner checks that visit counts do not exceed the number of
+  possible JOIN/Done-triggered visits. These counters are **events
+  considered**, not CPU cycle measurements.
+
+Since the failure-free benchmark uses a clock with a fixed lower bound
+and deadlines never expire, a lock blocked by its prepared-ahead window
+can only become eligible for more PREPAREs after a certified release.
+If deadline expiration is enabled in a future version, it will require
+a timer-driven wakeup in addition to this dirty-key worklist.
+
+Run only the **six-case** matched diagnostic on Node 4:
+
+~~~bash
+cd ~/rdmaLock && git pull --ff-only
+python3 tools/apt/run_suite.py \
+  --suite tools/apt/suites/live_key_scan_focus.json --fail-fast
+~~~
+
+The two points are 16 and 100000 uniform keys, with three repetitions
+each, 4 workers/CN (8 total), raw RDMA, one 8-byte write, 0 warmup,
+1-second measurement, no probes, legacy handoff preconnection disabled,
+and zero polling backoff. Compare medians and full trial ranges to the
+prior 29909 and 5808 ops/s measurements, explicitly noting the new
+commit. If 100000-key throughput improves but still plateaus, profile
+the centralized coordinator's per-JOIN quorum commits and per-Done
+RDMA release-marker reads before considering sharded Mu journals.
+This is *not* a DecLock throughput comparison.
+
 ## CPU polling and early handoff connection experiment
 
 This is **MuCQL-only tuning**, not a DecLock benchmark or a demonstrated

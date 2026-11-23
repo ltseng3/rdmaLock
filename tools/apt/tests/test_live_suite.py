@@ -224,6 +224,45 @@ class LiveSuiteTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     runner.expand_suite({'tests':[dict(BASE,**{knob:[bad]})]},TOPO)
 
+    def test_dirty_key_focus_six_case_hardware_comparison(self):
+        spec=json.loads((HERE/'suites/live_key_scan_focus.json').read_text())
+        cases=runner.expand_suite(spec,TOPO)
+        self.assertEqual(len(cases),6)
+        self.assertEqual(len({c['id'] for c in cases}),6)
+        self.assertEqual({c['locks'] for c in cases},{16,100000})
+        for c in cases:
+            self.assertEqual(c['workers_per_cn'],4)
+            self.assertEqual(c['transport'],'rdma')
+            self.assertEqual(c['distribution'],'uniform')
+            self.assertEqual(c['profile'],'raw')
+            self.assertEqual(c['measure_ms'],1000)
+            self.assertEqual(c['warmup_ms'],0)
+            self.assertEqual(c['data_ops'],1)
+            self.assertEqual(c['probe'],0)
+            self.assertEqual(c['rx_idle_us'],0)
+            self.assertEqual(c['handoff_idle_us'],0)
+            self.assertEqual(c['handoff_preconnect'],0)
+            cfg=runner.case_topology(TOPO,c,4101)
+            self.assertEqual(cluster.validate(cfg),8)
+
+    def test_dirty_key_accounting_in_live_output(self):
+        valid=LIVE_LINE+' join_key_visits=310 prepare_key_visits=600 distinct_keys_seen=16'
+        parsed=runner.extract_live(valid)
+        self.assertEqual(parsed['prepare_key_visits'],'600')
+        self.assertEqual(parsed['distinct_keys_seen'],'16')
+        # Old logs remain readable; the new diagnostics are optional, but
+        # must be complete and internally consistent when present.
+        self.assertNotIn('join_key_visits',runner.extract_live(LIVE_LINE))
+        for invalid in (
+            valid.replace('join_key_visits=310','join_key_visits=413'),
+            valid.replace('prepare_key_visits=600','prepare_key_visits=825'),
+            valid.replace('distinct_keys_seen=16','distinct_keys_seen=413'),
+            valid.replace('join_key_visits=310 ',''),
+        ):
+            with self.subTest(invalid=invalid[-105:]):
+                with self.assertRaisesRegex(ValueError,'dirty-key accounting'):
+                    runner.extract_live(invalid)
+
     def test_lock_count_sweep_varies_only_keyspace_and_distribution(self):
         suites=[
             ('live_key_scaling_smoke.json',22,4,1,500),

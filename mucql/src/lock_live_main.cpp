@@ -243,8 +243,14 @@ int coordinator(int argc,char**argv){
   auto end=start+std::chrono::milliseconds(o.warmup_ms+o.measure_ms);
   uint64_t joined=0,done=0,measured=0,prepare_records=0;
   uint64_t actual_join_batches=0,join_batch_sum=0;
+  uint64_t join_key_visits=0,prepare_key_visits=0;
   std::vector<uint64_t> latency,admission,waits;
+  // Keep all historical tickets for end-of-run verification, but only visit
+  // keys with newly committed JOINs or newly certified completions in the
+  // critical-path scheduling loop. Scanning every key ever seen made a
+  // 100,000-key uniform workload slower than a contended Zipf workload.
   std::map<LockId,std::deque<Event>> waiting;
+  std::set<LockId> join_ready, prepare_ready;
   std::map<LockId,std::vector<Ticket>> known;
   std::map<LockId,size_t> progress_frontier;
   std::map<GrantId,Ticket> granted;std::set<GrantId> completed;
@@ -268,6 +274,7 @@ int coordinator(int argc,char**argv){
           if(m.ticket.client!=e.worker+1||m.ticket.request==0||m.ticket.lock<kLockBase||
              m.ticket.lock>=kLockBase+o.lock_count)fail("invalid CN JOIN");
           waiting[m.ticket.lock].push_back(e);
+          join_ready.insert(m.ticket.lock);
         }else if(m.type==Done){
           const auto it=granted.find(m.ticket.grant);
           if(it==granted.end()||it->second.client!=e.worker+1||it->second.lock!=m.ticket.lock||
@@ -278,6 +285,10 @@ int coordinator(int argc,char**argv){
               " position="+std::to_string(m.ticket.position)+" oldpos="+(it==granted.end()?"missing":std::to_string(it->second.position))+" oldlock="+(it==granted.end()?"missing":std::to_string(it->second.lock))+" completions="+std::to_string(completed.count(m.ticket.grant)));
           if(release.read_slot(m.ticket.grant)!=m.ticket.grant)fail("uncertified release marker");
           leader.observe({it->second.lock,it->second.position,it->second.grant_id});
+          // A completed predecessor may free a PREPARE lookahead window.
+          // The benchmark clock never advances, so release notification
+          // (or a new JOIN) is the only reason to revisit this lock.
+          prepare_ready.insert(it->second.lock);
           done++;
           if(m.flags&1){measured++;latency.push_back(m.latency_ns);admission.push_back(m.admit_ns);
             waits.push_back(m.wait_ns);}
@@ -298,7 +309,10 @@ int coordinator(int argc,char**argv){
             later.swap(received);
           }
           for(const auto& e:later){
-            if(e.m.type==Join)waiting[e.m.ticket.lock].push_back(e);
+            if(e.m.type==Join){
+              waiting[e.m.ticket.lock].push_back(e);
+              join_ready.insert(e.m.ticket.lock);
+            }
             else{
               std::lock_guard<std::mutex> lock(mu);
               received.push_back(e);
@@ -306,7 +320,14 @@ int coordinator(int argc,char**argv){
           }
         }
       }
-      for(auto& [lock,queue]:waiting){
+      // Iterate just the keys that actually received JOINs. Process in
+      // ascending lock order as before; erase drained queues immediately.
+      for(LockId lock:join_ready){
+        auto pending=waiting.find(lock);
+        if(pending==waiting.end()||pending->second.empty())
+          fail("JOIN worklist key has no pending requests");
+        auto& queue=pending->second;
+        ++join_key_visits;
         while(!queue.empty()){
           const size_t cap=std::min<size_t>(o.join_aggregate,queue.size());
           if(!join_log_has_room(journal.decided_count(),cap,o.paxos_slots) || joined+cap>o.max_ops)
@@ -320,10 +341,18 @@ int coordinator(int argc,char**argv){
           for(auto& t:new_tickets){known[lock].push_back(t);joined++;}
           actual_join_batches++;join_batch_sum+=cap;
         }
+        waiting.erase(pending);
+        prepare_ready.insert(lock);
       }
+      join_ready.clear();
       // PREPARE must be committed BEFORE the owning CN or predecessor sees
       // the successor as activatable. The queue advances only on certified CAS.
-      for(auto& [lock,tickets]:known){
+      for(LockId lock:prepare_ready){
+        auto candidate=known.find(lock);
+        if(candidate==known.end()||candidate->second.empty())
+          fail("PREPARE worklist key has no committed JOIN");
+        auto& tickets=candidate->second;
+        ++prepare_key_visits;
         // A low-watermark trigger, with 1 = reactive and higher = proactive.
         auto initial_prepared=leader.prepared_count(lock);
         auto& progress=progress_frontier[lock];
@@ -349,6 +378,9 @@ int coordinator(int argc,char**argv){
           }
         }
       }
+      // A full lookahead window can only reopen on a certified release;
+      // Done re-arms the lock. Never carry idle keys into another pass.
+      prepare_ready.clear();
       if(stopped&&quiescent_count==o.workers&&done==joined)break;
     }
     // Out of stopwatch: independently verify every release, last protected
@@ -373,6 +405,9 @@ int coordinator(int argc,char**argv){
       <<" replenish_threshold="<<o.replenish_threshold<<" batch_wait_us="<<o.batch_wait_us<<" join_batches="<<actual_join_batches
       <<" actual_join_batch_mean="<<(actual_join_batches?double(join_batch_sum)/actual_join_batches:0)
       <<" prepare_records="<<prepare_records
+      <<" join_key_visits="<<join_key_visits
+      <<" prepare_key_visits="<<prepare_key_visits
+      <<" distinct_keys_seen="<<known.size()
       <<" latency_p50_ns="<<percentile(latency,0.5)
       <<" latency_p95_ns="<<percentile(latency,0.95)
       <<" latency_p99_ns="<<percentile(latency,0.99)

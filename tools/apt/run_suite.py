@@ -47,7 +47,9 @@ COLUMNS = ['case', 'scenario', 'trial', 'kind', 'measurement_scope', 'comparable
            'profile', 'transport', 'lock_count', 'distribution', 'warmup_ms', 'measure_ms', 'seed',
            'paxos_slots', 'max_ops', 'join_aggregate', 'phase2_window', 'prepare_range',
            'lookahead', 'replenish_threshold', 'batch_wait_us', 'measured', 'join_batches',
-           'actual_join_batch_mean', 'prepare_records', 'latency_p50_ns', 'latency_p95_ns',
+           'actual_join_batch_mean', 'prepare_records',
+           'join_key_visits', 'prepare_key_visits', 'distinct_keys_seen',
+           'latency_p50_ns', 'latency_p95_ns',
            'latency_p99_ns', 'admission_p50_ns', 'admission_p99_ns', 'handoff_wait_p99_ns', 'error']
 
 
@@ -231,6 +233,16 @@ def extract_live(text):
         int(result['handoff_preconnect']) not in (0,1) or
         int(result['data_writes_measured'])!=int(result['measured'])*int(result['data_ops'])):
         raise ValueError('LIVE completion/marker/ownership mismatch')
+    # Old revisions lack these extra diagnostics; do not retroactively
+    # require them when reading archived benchmark output.
+    worklist=('join_key_visits','prepare_key_visits','distinct_keys_seen')
+    if any(k in result for k in worklist):
+        if (not all(k in result for k in worklist) or
+            any(not result[k].isdigit() for k in worklist) or
+            int(result['join_key_visits'])>int(result['joins']) or
+            int(result['prepare_key_visits'])>int(result['joins'])+int(result['completed']) or
+            int(result['distinct_keys_seen'])>int(result['joins'])):
+            raise ValueError('LIVE dirty-key accounting inconsistent')
     for key in ('goodput_ops_per_sec','actual_join_batch_mean'):
         if not math.isfinite(float(result[key])) or float(result[key])<=0:
             raise ValueError('invalid LIVE metric '+key)
@@ -431,6 +443,8 @@ def benchmark(ex, case, topology, commit, session, run_root, ballot, timeout):
                       'handoff_wait_p99_ns','goodput_ops_per_sec','completed','verified_markers','violations',
                        'data_writes_measured'):
                 row[k]=summary[k]
+            for k in ('join_key_visits','prepare_key_visits','distinct_keys_seen'):
+                row[k]=summary.get(k,'')
         elif case['kind'] == 'prepared_e2e':
             for f in ('completed', 'verified_markers', 'violations', 'ordering_seconds',
                       'handoff_seconds', 'goodput_ops_per_sec', 'including_ordering_ops_per_sec'):

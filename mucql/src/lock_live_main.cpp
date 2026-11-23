@@ -374,8 +374,10 @@ int coordinator(int argc,char**argv){
       std::deque<Event> events;
       std::deque<PipeResult> committed;
       {std::unique_lock<std::mutex> lock(mu);
+        // If all CNs are quiescent but quorum work is still pending,
+        // sleep until the ordering actor produces its final completions.
         if(received.empty()&&finished_tasks.empty()&&recv_error.empty()&&
-           !(stopped&&quiescent_count==o.workers))
+           !(stopped&&quiescent_count==o.workers&&pending_tasks==0))
           cv.wait_for(lock,std::chrono::milliseconds(1));
         if(!recv_error.empty())fail(recv_error);
         events.swap(received);

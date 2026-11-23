@@ -14,10 +14,19 @@ class Profile:
     lookahead: int = 2
     replenish_threshold: int = 1
     batch_wait_us: int = 0
+    # Explicit opt-in. Existing raw and full profiles remain synchronous.
+    multi_key_pipeline: int = 0
 
 
 PROFILES = {
     'raw': Profile(),
+    # Matched control: same batching knobs but legacy single-key scheduling.
+    'multi_key_control': Profile(join_aggregate=16,phase2_window=16,
+                                 batch_wait_us=25),
+    # Post real JOIN and PREPARE records for independent keys in a bounded
+    # asynchronous Phase-2 window on a dedicated ordering thread.
+    'multi_key_async': Profile(join_aggregate=16,phase2_window=16,
+                               batch_wait_us=25,multi_key_pipeline=1),
     'join_control': Profile(batch_wait_us=25),
     'join_aggregation': Profile(join_aggregate=16, batch_wait_us=25),
     'phase2_control': Profile(join_aggregate=16, batch_wait_us=25),

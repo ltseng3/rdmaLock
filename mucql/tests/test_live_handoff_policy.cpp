@@ -42,6 +42,7 @@ int main() {
 
   // A different, completed grant cannot authorize this successor.
   const Ticket c=leader.join(77,3,1);
+  assert(c.position==2 && c.predecessor_id==prepared_b.grant_id);
   const Ticket prepared_c=leader.prepare(77,1).front();
   other.on_prepared(prepared_c);
   assert(choose_prepared_successor_route(prepared_c,prepared_b,certified,true)==

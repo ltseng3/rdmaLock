@@ -274,6 +274,7 @@ class LiveSuiteTests(unittest.TestCase):
         # The release data region is separate and sized for both key slots.
         base=dict(BASE)
         base.update(locks=[100000],paxos_slots=131072,max_ops=90000,
+                    profiles=['raw'],repetitions=1,
                     distributions=['uniform','zipf_0.99'])
         cases=runner.expand_suite({'tests':[base]},TOPO)
         self.assertEqual(len(cases),2)
